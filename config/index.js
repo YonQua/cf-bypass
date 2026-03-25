@@ -1,0 +1,29 @@
+const path = require('path')
+
+const CACHE_DIR = path.join(__dirname, '..', 'cache')
+const CACHE_FILE = path.join(CACHE_DIR, 'cache.json')
+
+function parseBooleanEnv(value, defaultValue) {
+  if (value == null) return defaultValue
+  const normalized = String(value).trim().toLowerCase()
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false
+  return defaultValue
+}
+
+module.exports = {
+  port: Number(process.env.PORT) || 8080,
+  authToken: process.env.authToken || null,
+  browserLimit: Number(process.env.browserLimit) || 20,
+  requestTimeoutMs: Number(process.env.timeOut) || 60000,
+  shutdownTimeoutMs: Math.max(10000, Number(process.env.timeOut) || 60000),
+  logTimeZone: process.env.LOG_TIMEZONE || 'Asia/Shanghai',
+  allowPrivateNetworkTargets: parseBooleanEnv(process.env.ALLOW_PRIVATE_NETWORK_TARGETS, true),
+  cache: {
+    dir: CACHE_DIR,
+    file: CACHE_FILE,
+    ttlMs: 5 * 60 * 1000,
+    flushIntervalMs: 30 * 1000,
+    flushDebounceMs: 1000,
+  },
+}

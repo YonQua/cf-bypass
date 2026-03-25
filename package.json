@@ -1,0 +1,23 @@
+{
+  "name": "cf-bypass",
+  "version": "1.0.0",
+  "description": "Cloudflare IUAM and Turnstile bypass service for authorized testing",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "puppeteer-real-browser": "^1.4.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  },
+  "nodemonConfig": {
+    "ignore": [
+      "cache/*",
+      "logs/*"
+    ],
+    "ext": "js,json"
+  }
+}
