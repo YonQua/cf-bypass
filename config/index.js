@@ -12,12 +12,14 @@ function parseBooleanEnv(value, defaultValue) {
 }
 
 module.exports = {
-  port: Number(process.env.PORT) || 8080,
+  port: Number(process.env.PORT) || 8081,
   authToken: process.env.authToken || null,
   browserLimit: Number(process.env.browserLimit) || 20,
   requestTimeoutMs: Number(process.env.timeOut) || 60000,
+  browserCloseTimeoutMs: Math.max(1000, Number(process.env.browserCloseTimeoutMs) || 5000),
   shutdownTimeoutMs: Math.max(10000, Number(process.env.timeOut) || 60000),
   logTimeZone: process.env.LOG_TIMEZONE || 'Asia/Shanghai',
+  logLevel: process.env.LOG_LEVEL || 'info',
   allowPrivateNetworkTargets: parseBooleanEnv(process.env.ALLOW_PRIVATE_NETWORK_TARGETS, true),
   cache: {
     dir: CACHE_DIR,

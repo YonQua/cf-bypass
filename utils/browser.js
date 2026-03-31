@@ -54,8 +54,38 @@ async function createBrowser({ proxyServer, timeoutMs }) {
   return { browser, page }
 }
 
+async function closeBrowser(browser, options = {}) {
+  if (!browser) return
+
+  const { timeoutMs, logger, logMeta } = options
+  const closeTimeoutMs = Number(timeoutMs) || 5000
+  let disconnected = false
+
+  try {
+    await withTimeout(browser.close(), closeTimeoutMs, 'browser close', {
+      phase: 'browser_close',
+    })
+  } catch (error) {
+    if (typeof browser.disconnect === 'function') {
+      try {
+        browser.disconnect()
+        disconnected = true
+      } catch {}
+    }
+
+    logger?.warn?.('event=browser_close_failed', {
+      ...logMeta,
+      timeout_ms: closeTimeoutMs,
+      error: error.message,
+      ...(error?.detail?.phase ? { failure_phase: error.detail.phase } : {}),
+      ...(disconnected ? { fallback_disconnect: true } : {}),
+    })
+  }
+}
+
 module.exports = {
   applyProxyAuthentication,
   applyRequestInterception,
+  closeBrowser,
   createBrowser,
 }

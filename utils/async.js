@@ -1,12 +1,13 @@
 const { createError } = require('./errors')
 
 // 统一超时控制，超时直接抛错，便于上层统一处理
-function withTimeout(promise, timeoutMs, label) {
+function withTimeout(promise, timeoutMs, label, options = {}) {
   const safeTimeoutMs = Number(timeoutMs) || 60000
+  const { code = 504, message, ...detail } = options
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
-      const message = `${label} timeout after ${safeTimeoutMs}ms`
-      reject(createError(message, 504, { timeoutMs: safeTimeoutMs, label }))
+      const timeoutMessage = message || `${label} timeout after ${safeTimeoutMs}ms`
+      reject(createError(timeoutMessage, code, { timeoutMs: safeTimeoutMs, label, ...detail }))
     }, safeTimeoutMs)
 
     promise

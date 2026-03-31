@@ -37,6 +37,12 @@ function formatMeta(meta) {
 }
 
 const DEFAULT_TIME_ZONE = 'Asia/Shanghai'
+const LOG_LEVELS = ['debug', 'info', 'warn', 'error']
+
+function normalizeLogLevel(level) {
+  const normalized = String(level || 'info').toLowerCase()
+  return LOG_LEVELS.includes(normalized) ? normalized : 'info'
+}
 
 function buildTimeFormatter(timeZone) {
   const resolvedTimeZone = timeZone || DEFAULT_TIME_ZONE
@@ -70,28 +76,64 @@ function buildTimeFormatter(timeZone) {
 
 function createLogger(options = {}) {
   const formatNow = buildTimeFormatter(options.timeZone)
-  function buildLine(message, meta) {
+  const minLevel = normalizeLogLevel(options.level)
+
+  function buildLine(level, message, meta) {
     const time = formatNow()
     const metaText = meta && typeof meta === 'object' ? formatMeta(meta) : ''
     const suffix = metaText ? ` ${metaText}` : ''
-    return `[${time}] ${message}${suffix}`
+    return `[${time}] level=${level} ${message}${suffix}`
+  }
+
+  function sanitizeMeta(meta) {
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return meta
+
+    return Object.fromEntries(
+      Object.entries(meta).filter(([, value]) => value !== undefined && value !== null)
+    )
+  }
+
+  function shouldLog(level) {
+    return LOG_LEVELS.indexOf(level) >= LOG_LEVELS.indexOf(minLevel)
+  }
+
+  function write(level, message, meta) {
+    if (!shouldLog(level)) return
+
+    const line = buildLine(level, message, sanitizeMeta(meta))
+    if (level === 'warn') {
+      console.warn(line)
+      return
+    }
+    if (level === 'error') {
+      console.error(line)
+      return
+    }
+    console.log(line)
   }
 
   return {
+    debug(message, meta) {
+      write('debug', message, meta)
+    },
+    info(message, meta) {
+      write('info', message, meta)
+    },
     log(message, meta) {
-      console.log(buildLine(message, meta))
+      write('info', message, meta)
     },
     warn(message, meta) {
-      console.warn(buildLine(message, meta))
+      write('warn', message, meta)
     },
     error(message, meta) {
-      console.error(buildLine(message, meta))
+      write('error', message, meta)
     },
   }
 }
 
 module.exports = {
   createError,
+  isTimeoutError,
   normalizeError,
   createLogger,
 }

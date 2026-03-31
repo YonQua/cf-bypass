@@ -16,8 +16,13 @@ function createCacheStore({
   let intervalTimer = null
 
   function logInfo(message) {
-    if (!logger?.log) return
-    logger.log(message)
+    if (logger?.debug) {
+      logger.debug(message)
+      return
+    }
+    if (logger?.log) {
+      logger.log(message)
+    }
   }
 
   function logWarn(message, error) {

@@ -141,7 +141,7 @@ async function cloudflare(data, page) {
         if (!clickModeEnabled && nowMs - startedAtMs >= observeStrictMs && !latestStrictClearance) {
           clickModeEnabled = true
           clickModeEnteredAtMs = nowMs
-          data.logger?.log('event=iuam_click_mode_enabled', {
+          data.logger?.debug?.('event=iuam_click_mode_enabled', {
             request_id: data.requestId,
             mode: 'iuam',
             observe_strict_ms: observeStrictMs,

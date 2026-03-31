@@ -12,6 +12,13 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - README API 文档现已同步说明 `funcaptcha` 的 lab-only 边界与调用示例
+- 默认日志级别现在聚焦摘要与异常，成功链路的 `request_start` / `browser_ready` 等细节下沉到 `LOG_LEVEL=debug`
+- 启动生命周期日志改为区分 `server_listening` 与 `server_listen_failed`，避免端口占用时先报成功再报失败
+- 请求摘要与拒绝日志重新补回脱敏后的 `target` 字段，保留站点上下文但不回打 query 噪声
+- `funcaptcha` 现在区分 `funcaptcha_page_load` 与 `funcaptcha_wait_token` 两类超时，相比 `browser_connect` 更便于定位
+- 浏览器关闭阶段新增独立超时与 `browser_close_failed` 告警，避免收尾反向拖长请求
+- `funcaptcha_wait_token` 超时现在会尽量带上页面快照，失败日志也会补充 `proxy_enabled` 便于排查代理链路
+- 当页面实际渲染的是 reCAPTCHA 而不是 `arkose_labs_token` 时，`funcaptcha` 会快速返回 `funcaptcha_recaptcha_present`，不再空等到超时
 
 ## [1.0.0] - 2026-03-25
 

@@ -2,13 +2,14 @@ const express = require('express')
 const net = require('net')
 const config = require('./config')
 const { createLogger, normalizeError, createError } = require('./utils/errors')
-const { createBrowser } = require('./utils/browser')
+const { createBrowser, closeBrowser } = require('./utils/browser')
 const { createCacheStore } = require('./utils/cacheStore')
 const { createSemaphore } = require('./utils/semaphore')
 
 const app = express()
 const port = config.port
 const authToken = config.authToken
+const SUPPORTED_MODES = new Set(['turnstile', 'funcaptcha', 'iuam'])
 let requestCounter = 0
 
 function createRequestId() {
@@ -153,6 +154,27 @@ function validateDomain(domain) {
   }
 }
 
+function buildLogTarget(domain) {
+  const raw = typeof domain === 'string' ? domain.trim() : ''
+  if (!raw) return undefined
+
+  try {
+    const parsed = new URL(raw)
+    const protocol = parsed.protocol.toLowerCase()
+    const hostname = parsed.hostname.toLowerCase()
+
+    let port = parsed.port
+    if ((protocol === 'http:' && port === '80') || (protocol === 'https:' && port === '443')) {
+      port = ''
+    }
+
+    const pathname = parsed.pathname === '/' ? '' : parsed.pathname
+    return `${protocol}//${hostname}${port ? `:${port}` : ''}${pathname}`
+  } catch {
+    return raw
+  }
+}
+
 function splitInternalResult(result) {
   if (!result || typeof result !== 'object' || Array.isArray(result)) {
     return { publicResult: result, internalMeta: null }
@@ -162,7 +184,55 @@ function splitInternalResult(result) {
   return { publicResult, internalMeta: _meta || null }
 }
 
-const logger = createLogger({ timeZone: config.logTimeZone })
+function buildRequestCompleteMeta({
+  requestId,
+  mode,
+  target,
+  code,
+  requestElapsedMs,
+  browserStartupMs,
+  cacheHit,
+  failurePhase,
+  enteredClickMode,
+  clearanceSource,
+}) {
+  return {
+    request_id: requestId,
+    mode,
+    ...(target ? { target } : {}),
+    code,
+    request_elapsed_ms: requestElapsedMs,
+    ...(typeof cacheHit === 'boolean' ? { cache_hit: cacheHit } : {}),
+    ...(browserStartupMs != null ? { browser_startup_ms: browserStartupMs } : {}),
+    ...(failurePhase ? { failure_phase: failurePhase } : {}),
+    ...(enteredClickMode ? { entered_click_mode: true } : {}),
+    ...(clearanceSource ? { clearance_source: clearanceSource } : {}),
+  }
+}
+
+function buildRequestFailureMeta({
+  requestId,
+  mode,
+  target,
+  requestElapsedMs,
+  failurePhase,
+  browserStartupMs,
+  enteredClickMode,
+  proxyEnabled,
+}) {
+  return {
+    request_id: requestId,
+    mode,
+    ...(target ? { target } : {}),
+    request_elapsed_ms: requestElapsedMs,
+    failure_phase: failurePhase,
+    ...(browserStartupMs != null ? { browser_startup_ms: browserStartupMs } : {}),
+    ...(enteredClickMode ? { entered_click_mode: true } : {}),
+    ...(typeof proxyEnabled === 'boolean' ? { proxy_enabled: proxyEnabled } : {}),
+  }
+}
+
+const logger = createLogger({ timeZone: config.logTimeZone, level: config.logLevel })
 
 const cacheStore = createCacheStore({
   filePath: config.cache.file,
@@ -197,13 +267,15 @@ app.use((req, res, next) => {
       clientIp = clientIp.substring(7)
     }
 
-    logger.log('event=request', {
+    logger.debug('event=request_start', {
       request_id: requestId,
       ip: clientIp,
       mode: req.body?.mode || 'unknown',
-      domain: req.body?.domain || 'unknown',
+      target: buildLogTarget(req.body?.domain) || 'unknown',
       cache_enabled:
-        req.body?.mode === 'iuam' && req.body?.cache !== false && req.body?.cache !== 'false',
+        req.body?.mode === 'iuam'
+          ? req.body?.cache !== false && req.body?.cache !== 'false'
+          : undefined,
     })
   }
   next()
@@ -217,6 +289,7 @@ app.post('/cloudflare', async (req, res) => {
   const data = req.body
   const requestId = req.requestId || createRequestId()
   const requestStartedAt = req.requestStartedAt || Date.now()
+  const target = buildLogTarget(data?.domain)
   let stage = 'request_validation'
   let browserStartupMs = null
   let failurePhase = null
@@ -227,7 +300,22 @@ app.post('/cloudflare', async (req, res) => {
     const error = createError('Bad Request: missing or invalid mode', 400)
     logger.warn('event=handler_reject', {
       request_id: requestId,
+      ...(target ? { target } : {}),
       failure_phase: stage,
+      request_elapsed_ms: Date.now() - requestStartedAt,
+      code: error.code,
+      message: error.message,
+    })
+    return res.status(error.code).json(normalizeError(error))
+  }
+  if (!SUPPORTED_MODES.has(data.mode)) {
+    const error = createError(`Bad Request: unsupported mode "${data.mode}"`, 400)
+    logger.warn('event=handler_reject', {
+      request_id: requestId,
+      mode: data.mode,
+      ...(target ? { target } : {}),
+      failure_phase: stage,
+      request_elapsed_ms: Date.now() - requestStartedAt,
       code: error.code,
       message: error.message,
     })
@@ -237,7 +325,10 @@ app.post('/cloudflare', async (req, res) => {
     const error = createError('Unauthorized', 401)
     logger.warn('event=handler_reject', {
       request_id: requestId,
+      mode: data.mode,
+      ...(target ? { target } : {}),
       failure_phase: stage,
+      request_elapsed_ms: Date.now() - requestStartedAt,
       code: error.code,
       message: error.message,
     })
@@ -250,7 +341,10 @@ app.post('/cloudflare', async (req, res) => {
     const normalized = normalizeError(err)
     logger.warn('event=handler_reject', {
       request_id: requestId,
+      mode: data.mode,
+      ...(target ? { target } : {}),
       failure_phase: stage,
+      request_elapsed_ms: Date.now() - requestStartedAt,
       code: normalized.code,
       message: normalized.message,
     })
@@ -264,15 +358,17 @@ app.post('/cloudflare', async (req, res) => {
     cacheKey = buildIuamCacheKey(data)
     const cached = cacheStore.get(cacheKey)
     if (cached) {
-      logger.log('event=request_complete', {
-        request_id: requestId,
-        mode: data.mode,
-        cache_hit: true,
-        request_elapsed_ms: Date.now() - requestStartedAt,
-        browser_startup_ms: null,
-        failure_phase: null,
-        entered_click_mode: false,
-      })
+      logger.info(
+        'event=request_complete',
+        buildRequestCompleteMeta({
+          requestId,
+          mode: data.mode,
+          target,
+          code: 200,
+          requestElapsedMs: Date.now() - requestStartedAt,
+          cacheHit: true,
+        })
+      )
       return res.status(200).json({ ...cached, cached: true })
     }
   }
@@ -284,7 +380,9 @@ app.post('/cloudflare', async (req, res) => {
     logger.warn('event=handler_reject', {
       request_id: requestId,
       mode: data.mode,
+      ...(target ? { target } : {}),
       failure_phase: stage,
+      request_elapsed_ms: Date.now() - requestStartedAt,
       code: error.code,
       message: error.message,
     })
@@ -306,7 +404,7 @@ app.post('/cloudflare', async (req, res) => {
     browserStartupMs = Date.now() - browserStartedAt
     browser = ctx.browser
     page = ctx.page
-    logger.log('event=browser_ready', {
+    logger.debug('event=browser_ready', {
       request_id: requestId,
       mode: data.mode,
       browser_startup_ms: browserStartupMs,
@@ -367,33 +465,45 @@ app.post('/cloudflare', async (req, res) => {
     enteredClickMode = normalized.detail?.enteredClickMode || false
     if (normalized.code >= 500) {
       logger.error('event=handler_error', {
-        request_id: requestId,
-        mode: data.mode,
-        request_elapsed_ms: Date.now() - requestStartedAt,
-        failure_phase: failurePhase,
-        browser_startup_ms: browserStartupMs,
-        entered_click_mode: enteredClickMode,
+        ...buildRequestFailureMeta({
+          requestId,
+          mode: data.mode,
+          target,
+          requestElapsedMs: Date.now() - requestStartedAt,
+          failurePhase,
+          browserStartupMs,
+          enteredClickMode,
+          proxyEnabled: Boolean(data.proxy),
+        }),
         error: err.message,
       })
     } else {
       logger.warn('event=handler_reject', {
-        request_id: requestId,
-        mode: data.mode,
-        request_elapsed_ms: Date.now() - requestStartedAt,
-        failure_phase: failurePhase,
-        browser_startup_ms: browserStartupMs,
-        entered_click_mode: enteredClickMode,
+        ...buildRequestFailureMeta({
+          requestId,
+          mode: data.mode,
+          target,
+          requestElapsedMs: Date.now() - requestStartedAt,
+          failurePhase,
+          browserStartupMs,
+          enteredClickMode,
+          proxyEnabled: Boolean(data.proxy),
+        }),
         code: normalized.code,
         message: normalized.message,
       })
     }
     result = normalized
   } finally {
-    if (browser) {
-      try {
-        await browser.close()
-      } catch {}
-    }
+    await closeBrowser(browser, {
+      timeoutMs: config.browserCloseTimeoutMs,
+      logger,
+      logMeta: {
+        request_id: requestId,
+        mode: data.mode,
+        ...(target ? { target } : {}),
+      },
+    })
     release()
   }
 
@@ -402,17 +512,21 @@ app.post('/cloudflare', async (req, res) => {
     enteredClickMode = internalMeta.enteredClickMode || false
     clearanceSource = internalMeta.clearanceSource || null
   }
-  logger.log('event=request_complete', {
-    request_id: requestId,
-    mode: data.mode,
-    code: publicResult.code ?? 200,
-    cache_hit: false,
-    request_elapsed_ms: Date.now() - requestStartedAt,
-    browser_startup_ms: browserStartupMs,
-    failure_phase: publicResult.code ? failurePhase || stage : null,
-    entered_click_mode: enteredClickMode,
-    clearance_source: clearanceSource,
-  })
+  logger.info(
+    'event=request_complete',
+    buildRequestCompleteMeta({
+      requestId,
+      mode: data.mode,
+      target,
+      code: publicResult.code ?? 200,
+      cacheHit: data.mode === 'iuam' ? false : undefined,
+      requestElapsedMs: Date.now() - requestStartedAt,
+      browserStartupMs,
+      failurePhase: publicResult.code ? failurePhase || stage : null,
+      enteredClickMode,
+      clearanceSource,
+    })
+  )
 
   res.status(publicResult.code ?? 200).json({ ...publicResult, cached: false })
 })
@@ -425,12 +539,24 @@ app.use((req, res) => {
   res.status(404).json({ message: 'Not Found' })
 })
 
-const server = app.listen(port, () => {
-  logger.log('event=server_start', { port })
+const server = app.listen(port)
+
+server.on('listening', () => {
+  const address = server.address()
+  logger.info('event=server_listening', {
+    port: typeof address === 'object' && address ? address.port : port,
+    host: typeof address === 'object' && address ? address.address : undefined,
+    pid: process.pid,
+  })
 })
 
 server.on('error', (err) => {
-  logger.error('event=server_error', { error: err.message, code: err.code })
+  logger.error(server.listening ? 'event=server_error' : 'event=server_listen_failed', {
+    error: err.message,
+    code: err.code,
+    port,
+    pid: process.pid,
+  })
 })
 
 let shuttingDown = false
@@ -441,7 +567,7 @@ async function gracefulShutdown(signal) {
     return
   }
   shuttingDown = true
-  logger.log('event=server_shutdown', { signal })
+  logger.info('event=server_shutdown', { signal })
   const shutdownTimer = setTimeout(() => {
     logger.error('event=shutdown_timeout', { timeoutMs: config.shutdownTimeoutMs })
     process.exit(1)
@@ -464,7 +590,7 @@ async function gracefulShutdown(signal) {
     })
 
     clearTimeout(shutdownTimer)
-    logger.log('event=server_stopped')
+    logger.info('event=server_stopped')
     process.exit(0)
   } catch (err) {
     clearTimeout(shutdownTimer)

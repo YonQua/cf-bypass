@@ -49,8 +49,17 @@ docker compose up --build -d
 | `authToken`                     | `null`          | 可选的接口认证 Token                                         |
 | `browserLimit`                  | `20`            | 最大浏览器并发数                                             |
 | `timeOut`                       | `60000`         | 全局请求超时（毫秒）                                         |
+| `browserCloseTimeoutMs`         | `5000`          | 单次请求结束后等待浏览器关闭的最长时间，避免收尾拖长响应     |
+| `LOG_LEVEL`                     | `info`          | 日志级别：`debug` / `info` / `warn` / `error`                |
 | `LOG_TIMEZONE`                  | `Asia/Shanghai` | 日志时区（IANA）                                             |
 | `ALLOW_PRIVATE_NETWORK_TARGETS` | `true`          | 是否允许 `localhost`、私网、回环、链路本地字面量地址作为目标 |
+
+日志级别说明：
+
+- `info`（默认）：保留 `server_*`、`request_complete`、`handler_reject`、`handler_error` 这类摘要与异常日志
+- `debug`：额外输出 `request_start`、`browser_ready`、`cache_purge`、`iuam_click_mode_enabled` 等排障细节
+- logger 会自动省略 `null` / `undefined` 字段，避免成功日志被空值刷屏
+- 摘要日志中的 `target` 会保留协议、主机与路径，但默认省略 query / hash，兼顾定位与降噪
 
 ## API
 
@@ -73,6 +82,14 @@ docker compose up --build -d
 - `timeoutMs`：可选，本次请求超时，优先于全局 `timeOut`
 - `cache`：可选，仅对 `iuam` 生效；设为 `false` 时跳过缓存
 - `proxy`：可选，代理对象格式如下
+
+`funcaptcha` 超时说明：
+
+- 若页面加载超时，日志与错误会标记为 `funcaptcha_page_load`
+- 若页面直接渲染出 reCAPTCHA 而非 `arkose_labs_token`，会快速返回 `422`，并标记为 `funcaptcha_recaptcha_present`
+- 若页面已打开但 `arkose_labs_token` 一直未出现或为空，日志与错误会标记为 `funcaptcha_wait_token`
+- `funcaptcha_wait_token` 的错误 detail 会尽量附带当前页面快照，例如 `currentUrl`、`pageTitle`、`hasArkoseForm`、`tokenInputPresent`
+- 请求结束后的浏览器关闭阶段受 `browserCloseTimeoutMs` 限制；即使关闭卡住，也不会继续无限拖长主请求
 
 ```json
 {
@@ -204,5 +221,11 @@ Dockerfile
 - [cf-bypass-fast](https://github.com/AkaneSakuramori/cf-bypass-fast)
 
 ## 说明
+
+
+
+  
+  
+  
 
 本项目仅供授权测试、学习与研究使用。请遵守目标站点规则与适用法律法规。
