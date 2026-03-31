@@ -93,8 +93,7 @@ docker compose up --build -d
 
 ```json
 {
-  "hostname": "http://proxy.example.com",
-  "port": 8080,
+  "url": "http://proxy.example.com:8080",
   "username": "optional-user",
   "password": "optional-pass"
 }
@@ -102,8 +101,9 @@ docker compose up --build -d
 
 代理约束：
 
-- `hostname` 必须是非空字符串，建议带协议前缀，如 `http://`、`https://`、`socks5://`
-- `port` 必须是正整数
+- `url` 必须是合法的代理 URL，且必须显式包含协议与端口
+- 当前支持的协议是 `http://`、`https://`、`socks4://`、`socks5://`
+- `url` 不能内嵌用户名密码；若需要认证，请使用独立的 `username` / `password`
 - 若提供认证信息，`username` 和 `password` 必须同时提供
 - Chromium 对 SOCKS5 用户名密码认证的兼容性通常不如 HTTP / HTTPS 代理稳定
 
@@ -221,11 +221,5 @@ Dockerfile
 - [cf-bypass-fast](https://github.com/AkaneSakuramori/cf-bypass-fast)
 
 ## 说明
-
-
-
-  
-  
-  
 
 本项目仅供授权测试、学习与研究使用。请遵守目标站点规则与适用法律法规。

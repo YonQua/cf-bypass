@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- `proxy` 请求参数现在统一为 `{"url", "username", "password"}` 形态，不再接受旧的 `hostname` / `port` 拆分格式
 - README API 文档现已同步说明 `funcaptcha` 的 lab-only 边界与调用示例
 - 默认日志级别现在聚焦摘要与异常，成功链路的 `request_start` / `browser_ready` 等细节下沉到 `LOG_LEVEL=debug`
 - 启动生命周期日志改为区分 `server_listening` 与 `server_listen_failed`，避免端口占用时先报成功再报失败

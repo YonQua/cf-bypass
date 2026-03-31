@@ -2,6 +2,7 @@ const express = require('express')
 const net = require('net')
 const config = require('./config')
 const { createLogger, normalizeError, createError } = require('./utils/errors')
+const { normalizeProxy, buildProxyCacheKeyValue } = require('./utils/proxy')
 const { createBrowser, closeBrowser } = require('./utils/browser')
 const { createCacheStore } = require('./utils/cacheStore')
 const { createSemaphore } = require('./utils/semaphore')
@@ -19,14 +20,7 @@ function createRequestId() {
 
 function buildIuamCacheKey(data) {
   const domain = normalizeDomainForCacheKey(data?.domain)
-  const proxy = data?.proxy
-    ? {
-        hostname: data.proxy.hostname || null,
-        port: data.proxy.port || null,
-        username: data.proxy.username || null,
-      }
-    : null
-
+  const proxy = buildProxyCacheKeyValue(data?.proxy)
   return JSON.stringify({ mode: 'iuam', domain, proxy })
 }
 
@@ -48,38 +42,6 @@ function normalizeDomainForCacheKey(input) {
     return `${protocol}//${hostname}${port ? `:${port}` : ''}${pathname}${url.search}`
   } catch {
     return domain
-  }
-}
-
-function validateProxy(proxy) {
-  if (proxy == null) return
-  if (typeof proxy !== 'object' || Array.isArray(proxy)) {
-    throw createError('Bad Request: invalid proxy parameter', 400)
-  }
-
-  if (typeof proxy.hostname !== 'string' || proxy.hostname.trim() === '') {
-    throw createError('Bad Request: proxy.hostname must be a non-empty string', 400)
-  }
-
-  if (!Number.isInteger(proxy.port) || proxy.port <= 0) {
-    throw createError('Bad Request: proxy.port must be a positive integer', 400)
-  }
-
-  const hasUsername = proxy.username !== undefined && proxy.username !== null
-  const hasPassword = proxy.password !== undefined && proxy.password !== null
-  if (hasUsername !== hasPassword) {
-    throw createError(
-      'Bad Request: proxy.username and proxy.password must be provided together',
-      400
-    )
-  }
-
-  if (hasUsername && (typeof proxy.username !== 'string' || proxy.username.trim() === '')) {
-    throw createError('Bad Request: proxy.username must be a non-empty string', 400)
-  }
-
-  if (hasPassword && (typeof proxy.password !== 'string' || proxy.password.trim() === '')) {
-    throw createError('Bad Request: proxy.password must be a non-empty string', 400)
   }
 }
 
@@ -336,7 +298,7 @@ app.post('/cloudflare', async (req, res) => {
   }
   try {
     validateDomain(data.domain)
-    validateProxy(data.proxy)
+    data.proxy = normalizeProxy(data.proxy)
   } catch (err) {
     const normalized = normalizeError(err)
     logger.warn('event=handler_reject', {
@@ -395,10 +357,10 @@ app.post('/cloudflare', async (req, res) => {
 
   try {
     stage = 'browser_connect'
-    const proxyServer = data.proxy ? `${data.proxy.hostname}:${data.proxy.port}` : null
+    const proxyUrl = data.proxy?.url || null
     const browserStartedAt = Date.now()
     const ctx = await createBrowser({
-      proxyServer,
+      proxyUrl,
       timeoutMs: requestTimeout,
     })
     browserStartupMs = Date.now() - browserStartedAt

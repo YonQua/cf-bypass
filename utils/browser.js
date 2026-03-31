@@ -32,7 +32,7 @@ async function applyRequestInterception(page, handler, options = {}) {
   })
 }
 
-async function createBrowser({ proxyServer, timeoutMs }) {
+async function createBrowser({ proxyUrl, timeoutMs }) {
   const requestTimeoutMs = Number(timeoutMs) || 60000
   const connectOptions = {
     headless: false,
@@ -41,8 +41,8 @@ async function createBrowser({ proxyServer, timeoutMs }) {
     disableXvfb: false,
   }
 
-  if (proxyServer) {
-    connectOptions.args = [`--proxy-server=${proxyServer}`]
+  if (proxyUrl) {
+    connectOptions.args = [`--proxy-server=${proxyUrl}`]
   }
 
   const { browser, page } = await withTimeout(
