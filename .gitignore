@@ -26,11 +26,13 @@ AGENTS.md
 .serena/
 .ref-cf-bypass-fast/
 .git.backup-*/
+.codex
 
 .temp/
 .tmp/
 .tmp_server.*
 backup/
+
 
 cf_test.sh
 cf_test.py

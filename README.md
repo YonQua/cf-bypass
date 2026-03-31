@@ -1,14 +1,15 @@
 # CF Bypass
 
-> 当前版本：`v1.0.0`
+> 当前版本：`v1.0.0`（当前工作树包含未发布的 `funcaptcha` lab 模式）
 
-一个基于 Node.js 与 Chromium 的 Cloudflare IUAM / Turnstile 处理服务，用于在授权测试或受控环境中获取 `cf_clearance` 或 Turnstile token。项目目标是保持接口简单、部署直接、日志可排障。
+一个基于 Node.js 与 Chromium 的 Cloudflare IUAM / Turnstile / lab-only FunCaptcha 处理服务，用于在授权测试或受控环境中获取 `cf_clearance`、Turnstile token，或受控页面中的 `arkose_labs_token`。项目目标是保持接口简单、部署直接、日志可排障。
 
 ## 功能特性
 
-- 支持 `iuam` 与 `turnstile` 两种模式
+- 支持 `iuam`、`turnstile` 与 `funcaptcha` 三种模式
 - 支持对象形式的 HTTP / HTTPS 代理，并兼容部分 `socks5://` 传输场景
 - IUAM 请求支持缓存、严格链路优先与点击兜底
+- `funcaptcha` 模式支持打开受控页面并读取 `arkose_labs_token`
 - 提供结构化日志与 `GET /health` 健康检查
 - 提供 Docker Compose 部署配置
 
@@ -66,7 +67,7 @@ docker compose up --build -d
 
 参数说明：
 
-- `mode`：必填，`iuam` 或 `turnstile`
+- `mode`：必填，`iuam`、`turnstile` 或 `funcaptcha`
 - `domain`：必填，必须是合法的 `http://` 或 `https://` URL，且不能包含用户名/密码
 - `siteKey`：`turnstile` 模式必填
 - `timeoutMs`：可选，本次请求超时，优先于全局 `timeOut`
@@ -117,6 +118,19 @@ Turnstile 返回示例：
 }
 ```
 
+FunCaptcha 返回示例：
+
+```json
+{
+  "token": "78818a19367328485.0208258002|r=lab|pk=LOCAL-ARKOSE-KEY",
+  "page_url": "https://toy-app.local/-/trial_registrations/new",
+  "page_title": "Toy Registration",
+  "user_agent": "Mozilla/5.0...",
+  "elapsed_time": 1.42,
+  "cached": false
+}
+```
+
 错误返回示例：
 
 ```json
@@ -160,6 +174,19 @@ curl -sS -X POST 'http://127.0.0.1:8080/cloudflare' \
   -H 'Content-Type: application/json' \
   -d '{"domain":"https://example.com","siteKey":"<your-site-key>","mode":"turnstile"}'
 ```
+
+FunCaptcha：
+
+```bash
+curl -sS -X POST 'http://127.0.0.1:8080/cloudflare' \
+  -H 'Content-Type: application/json' \
+  -d '{"domain":"https://toy-app.local/-/trial_registrations/new","mode":"funcaptcha"}'
+```
+
+`funcaptcha` 说明：
+
+- 该模式面向受控测试页或 CTF toy app，默认等待页面中的 `input[name="arkose_labs_token"]` 出现非空值
+- 当前实现不会注入 Arkose 页面，也不会尝试求解真实站点挑战；它只读取页面中最终已经写入 DOM 的 token
 
 ## 项目结构
 

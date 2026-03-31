@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- 新增 `funcaptcha` 模式，用于在受控测试页或 CTF toy app 中读取 `arkose_labs_token`
+- `funcaptcha` 返回值补充 `page_url` 与 `page_title`，便于确认重定向后的真实落点
+
+### Changed
+
+- README API 文档现已同步说明 `funcaptcha` 的 lab-only 边界与调用示例
+
 ## [1.0.0] - 2026-03-25
 
 ### Added

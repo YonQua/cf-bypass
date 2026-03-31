@@ -210,6 +210,7 @@ app.use((req, res, next) => {
 })
 
 const turnstile = require('./endpoints/turnstile')
+const funcaptcha = require('./endpoints/funcaptcha')
 const cloudflare = require('./endpoints/cloudflare')
 
 app.post('/cloudflare', async (req, res) => {
@@ -322,6 +323,18 @@ app.post('/cloudflare', async (req, res) => {
             defaultTimeoutMs: config.requestTimeoutMs,
             logger,
             requestId,
+          },
+          page
+        )
+        break
+
+      case 'funcaptcha':
+        stage = 'funcaptcha_execute'
+        result = await funcaptcha(
+          {
+            ...data,
+            timeoutMs: requestTimeout,
+            defaultTimeoutMs: config.requestTimeoutMs,
           },
           page
         )
