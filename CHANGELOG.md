@@ -8,10 +8,16 @@ All notable changes to this project will be documented in this file.
 
 - 新增 `funcaptcha` 模式，用于在受控测试页或 CTF toy app 中读取 `arkose_labs_token`
 - `funcaptcha` 返回值补充 `page_url` 与 `page_title`，便于确认重定向后的真实落点
+- 新增 CloakBrowser 主浏览器路径，通过 `cloakbrowser/puppeteer` 启动 stealth Chromium binary
+- 新增 CloakBrowser 相关配置：`CLOAKBROWSER_HEADLESS`、`CLOAKBROWSER_HUMANIZE`、`CLOAKBROWSER_STEALTH_ARGS`、`CLOAKBROWSER_FINGERPRINT_SEED`、`CLOAKBROWSER_TIMEZONE`、`CLOAKBROWSER_LOCALE`
 
 ### Changed
 
 - `proxy` 请求参数现在统一为 `{"url", "username", "password"}` 形态，不再接受旧的 `hostname` / `port` 拆分格式
+- 浏览器主线收敛为 CloakBrowser-only，移除 `puppeteer-real-browser` 依赖与系统 Chromium 143 回退路径
+- Docker Compose 默认通过 Xvfb 运行 headful CloakBrowser，并固定 fingerprint seed、timezone 与 locale
+- Docker 构建阶段预下载 CloakBrowser binary，并将该层前移到源码复制之前以复用构建缓存，同时补充 emoji / 扩展字体包以降低 font/canvas 指纹异常
+- Turnstile 增加自有 widget 点击循环与 `cf-turnstile-response` token 读取，用于替代旧版 `turnstile:true` 的隐式交互层
 - README API 文档现已同步说明 `funcaptcha` 的 lab-only 边界与调用示例
 - 默认日志级别现在聚焦摘要与异常，成功链路的 `request_start` / `browser_ready` 等细节下沉到 `LOG_LEVEL=debug`
 - 启动生命周期日志改为区分 `server_listening` 与 `server_listen_failed`，避免端口占用时先报成功再报失败

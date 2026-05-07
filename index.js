@@ -357,10 +357,9 @@ app.post('/cloudflare', async (req, res) => {
 
   try {
     stage = 'browser_connect'
-    const proxyUrl = data.proxy?.url || null
     const browserStartedAt = Date.now()
     const ctx = await createBrowser({
-      proxyUrl,
+      proxy: data.proxy,
       timeoutMs: requestTimeout,
     })
     browserStartupMs = Date.now() - browserStartedAt
@@ -369,6 +368,7 @@ app.post('/cloudflare', async (req, res) => {
     logger.debug('event=browser_ready', {
       request_id: requestId,
       mode: data.mode,
+      browser_provider: 'cloakbrowser',
       browser_startup_ms: browserStartupMs,
       proxy_enabled: Boolean(data.proxy),
     })
@@ -508,6 +508,7 @@ server.on('listening', () => {
   logger.info('event=server_listening', {
     port: typeof address === 'object' && address ? address.port : port,
     host: typeof address === 'object' && address ? address.address : undefined,
+    browser_provider: 'cloakbrowser',
     pid: process.pid,
   })
 })

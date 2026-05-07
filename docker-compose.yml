@@ -10,19 +10,30 @@ services:
     container_name: cf-bypass
     # 重启策略：容器退出时自动重启
     restart: unless-stopped
-    # 端口映射：宿主机8080端口映射到容器8080端口
+    # CloakBrowser 使用 headful + Xvfb，尽量贴近真实桌面浏览器环境
+    command: ['xvfb-run', '-a', 'npm', 'start']
+    # 端口映射：默认宿主机8080端口映射到容器8080端口，可用 HOST_PORT 覆盖宿主机端口
     ports:
-      - '8080:8080'
+      - '${HOST_PORT:-8080}:8080'
     # 环境变量配置
     environment:
       # 服务端口
       - PORT=8080
       # 最大并发浏览器数量
-      - browserLimit=20
+      - browserLimit=3
       # 超时时间（毫秒）
-      - timeOut=60000
+      - timeOut=90000
       # API认证令牌（留空表示不需要）
       - authToken=
+      # CloakBrowser 固定指纹与地区参数，降低同一出口反复表现为新设备的概率
+      - CLOAKBROWSER_HEADLESS=false
+      - CLOAKBROWSER_HUMANIZE=true
+      - CLOAKBROWSER_STEALTH_ARGS=true
+      - CLOAKBROWSER_FINGERPRINT_SEED=cf-bypass-poc-001
+      - CLOAKBROWSER_TIMEZONE=America/New_York
+      - CLOAKBROWSER_LOCALE=en-US
+      - CLOAKBROWSER_AUTO_UPDATE=false
+      - CLOAKBROWSER_CACHE_DIR=/app/.cloakbrowser
       # 跳过Puppeteer自动下载Chromium
       - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
     # 共享内存大小：Chrome需要较大共享内存
@@ -43,8 +54,8 @@ services:
       retries: 3
       start_period: 10s
     # 基本资源限制（普通 compose 生效）
-    mem_limit: 1g
-    cpus: '1.0'
+    mem_limit: 2g
+    cpus: '2.0'
     # 日志轮转
     logging:
       driver: 'json-file'

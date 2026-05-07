@@ -1,7 +1,8 @@
-const { connect } = require('puppeteer-real-browser')
+const config = require('../config')
 const { withTimeout } = require('./async')
 
 async function applyProxyAuthentication(page, proxy) {
+  if (page?.__proxyAuthenticationHandled) return
   if (!proxy?.username || !proxy?.password) return
   await page.authenticate({
     username: proxy.username,
@@ -32,24 +33,56 @@ async function applyRequestInterception(page, handler, options = {}) {
   })
 }
 
-async function createBrowser({ proxyUrl, timeoutMs }) {
+function buildCloakbrowserProxy(proxy) {
+  if (!proxy?.url) return undefined
+
+  const parsed = new URL(proxy.url)
+  if (parsed.protocol === 'socks5:') {
+    if (!proxy.username && !proxy.password) return proxy.url
+
+    parsed.username = proxy.username
+    parsed.password = proxy.password
+    return parsed.href.replace(/\/$/, '')
+  }
+
+  const result = { server: proxy.url }
+  if (proxy.username) result.username = proxy.username
+  if (proxy.password) result.password = proxy.password
+  return result
+}
+
+function buildCloakbrowserArgs() {
+  const args = []
+  if (config.cloakbrowser.fingerprintSeed) {
+    args.push(`--fingerprint=${config.cloakbrowser.fingerprintSeed}`)
+  }
+  return args
+}
+
+async function createBrowser({ proxy, timeoutMs }) {
   const requestTimeoutMs = Number(timeoutMs) || 60000
-  const connectOptions = {
-    headless: false,
-    turnstile: true,
-    connectOption: { defaultViewport: null },
-    disableXvfb: false,
-  }
+  const { launch } = await import('cloakbrowser/puppeteer')
 
-  if (proxyUrl) {
-    connectOptions.args = [`--proxy-server=${proxyUrl}`]
-  }
-
-  const { browser, page } = await withTimeout(
-    connect(connectOptions),
+  const browser = await withTimeout(
+    launch({
+      headless: config.cloakbrowser.headless,
+      humanize: config.cloakbrowser.humanize,
+      stealthArgs: config.cloakbrowser.stealthArgs,
+      timezone: config.cloakbrowser.timezone,
+      locale: config.cloakbrowser.locale,
+      proxy: buildCloakbrowserProxy(proxy),
+      args: buildCloakbrowserArgs(),
+      launchOptions: {
+        defaultViewport: null,
+      },
+    }),
     requestTimeoutMs,
     'browser connect'
   )
+  const page = await withTimeout(browser.newPage(), requestTimeoutMs, 'browser new page', {
+    phase: 'browser_new_page',
+  })
+  page.__proxyAuthenticationHandled = Boolean(proxy?.username && proxy?.password)
 
   return { browser, page }
 }

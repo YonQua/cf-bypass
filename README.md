@@ -2,7 +2,7 @@
 
 > 当前版本：`v1.0.0`（当前工作树包含未发布的 `funcaptcha` lab 模式）
 
-一个基于 Node.js 与 Chromium 的 Cloudflare IUAM / Turnstile / lab-only FunCaptcha 处理服务，用于在授权测试或受控环境中获取 `cf_clearance`、Turnstile token，或受控页面中的 `arkose_labs_token`。项目目标是保持接口简单、部署直接、日志可排障。
+一个基于 Node.js 与 CloakBrowser Chromium 的 Cloudflare IUAM / Turnstile / lab-only FunCaptcha 处理服务，用于在授权测试或受控环境中获取 `cf_clearance`、Turnstile token，或受控页面中的 `arkose_labs_token`。项目目标是保持接口简单、部署直接、日志可排障。
 
 ## 功能特性
 
@@ -10,6 +10,7 @@
 - 支持对象形式的 HTTP / HTTPS 代理，并兼容部分 `socks5://` 传输场景
 - IUAM 请求支持缓存、严格链路优先与点击兜底
 - `funcaptcha` 模式支持打开受控页面并读取 `arkose_labs_token`
+- 使用 `cloakbrowser/puppeteer` 启动 CloakBrowser stealth Chromium binary
 - 提供结构化日志与 `GET /health` 健康检查
 - 提供 Docker Compose 部署配置
 
@@ -34,6 +35,12 @@ npm run dev
 docker compose up --build -d
 ```
 
+如果宿主机 `8080` 已被占用，可只改宿主机端口，容器内仍监听 `8080`：
+
+```bash
+HOST_PORT=18080 docker compose up --build -d
+```
+
 默认命名：
 
 - 镜像：`cf-bypass:latest`
@@ -46,13 +53,22 @@ docker compose up --build -d
 | 变量名                          | 默认值          | 描述                                                         |
 | ------------------------------- | --------------- | ------------------------------------------------------------ |
 | `PORT`                          | `8080`          | 服务监听端口                                                 |
+| `HOST_PORT`                     | `8080`          | Docker Compose 宿主机映射端口，不影响容器内 `PORT`           |
 | `authToken`                     | `null`          | 可选的接口认证 Token                                         |
-| `browserLimit`                  | `20`            | 最大浏览器并发数                                             |
-| `timeOut`                       | `60000`         | 全局请求超时（毫秒）                                         |
+| `browserLimit`                  | `20`            | 最大浏览器并发数；Docker Compose 默认设为 `3`                |
+| `timeOut`                       | `60000`         | 全局请求超时（毫秒）；Docker Compose 默认设为 `90000`         |
 | `browserCloseTimeoutMs`         | `5000`          | 单次请求结束后等待浏览器关闭的最长时间，避免收尾拖长响应     |
 | `LOG_LEVEL`                     | `info`          | 日志级别：`debug` / `info` / `warn` / `error`                |
 | `LOG_TIMEZONE`                  | `Asia/Shanghai` | 日志时区（IANA）                                             |
 | `ALLOW_PRIVATE_NETWORK_TARGETS` | `true`          | 是否允许 `localhost`、私网、回环、链路本地字面量地址作为目标 |
+| `CLOAKBROWSER_HEADLESS`         | `false`         | CloakBrowser 是否使用 headless 模式；Docker Compose 通过 Xvfb 默认使用 headful |
+| `CLOAKBROWSER_HUMANIZE`         | `true`          | CloakBrowser 是否启用人类化鼠标/键盘/滚动行为                |
+| `CLOAKBROWSER_STEALTH_ARGS`     | `true`          | CloakBrowser 是否使用默认 stealth 参数                       |
+| `CLOAKBROWSER_FINGERPRINT_SEED` | `null`          | 可选固定 fingerprint seed，用于同站点/同代理复访测试         |
+| `CLOAKBROWSER_TIMEZONE`         | `null`          | 可选 IANA 时区，例如 `America/New_York`                      |
+| `CLOAKBROWSER_LOCALE`           | `null`          | 可选 BCP 47 locale，例如 `en-US`                             |
+| `CLOAKBROWSER_AUTO_UPDATE`      | `false`         | Docker 镜像默认禁用 CloakBrowser 自动更新检查，避免版本漂移  |
+| `CLOAKBROWSER_CACHE_DIR`        | `/app/.cloakbrowser` | Docker 镜像内 CloakBrowser binary 缓存目录              |
 
 日志级别说明：
 
@@ -60,6 +76,13 @@ docker compose up --build -d
 - `debug`：额外输出 `request_start`、`browser_ready`、`cache_purge`、`iuam_click_mode_enabled` 等排障细节
 - logger 会自动省略 `null` / `undefined` 字段，避免成功日志被空值刷屏
 - 摘要日志中的 `target` 会保留协议、主机与路径，但默认省略 query / hash，兼顾定位与降噪
+
+CloakBrowser 说明：
+
+- 当前主线只保留 CloakBrowser，不再内置 `puppeteer-real-browser` 或系统 Chromium 回退路径
+- Docker Compose 使用 `xvfb-run -a npm start` 启动 headful CloakBrowser，以贴近真实桌面浏览器环境
+- Docker Compose 默认固定 `CLOAKBROWSER_FINGERPRINT_SEED=cf-bypass-poc-001`，避免同一出口连续请求时每次表现为全新设备
+- CloakBrowser binary 受其独立 Binary License 约束；内部授权测试可用，若作为第三方浏览器服务提供需先确认 OEM/SaaS 授权
 
 ## API
 
@@ -81,7 +104,17 @@ docker compose up --build -d
 - `siteKey`：`turnstile` 模式必填
 - `timeoutMs`：可选，本次请求超时，优先于全局 `timeOut`
 - `cache`：可选，仅对 `iuam` 生效；设为 `false` 时跳过缓存
+- `debugArtifacts`：可选，仅建议排障时设为 `true`；`turnstile` 失败时会输出页面诊断工件路径
 - `proxy`：可选，代理对象格式如下
+
+Turnstile 超时排障说明：
+
+- 默认会在失败日志与错误 detail 中记录 `apiScriptRequested`、`apiScriptLoaded`、`apiScriptStatus`、`turnstileIframeCount`、`consoleErrorCount`、`currentUrl`、`pageTitle`
+- Turnstile 会循环检测并点击 `cf-turnstile-response` 父节点、Turnstile iframe、widget 容器及典型 300px challenge 区域，替代旧版 `puppeteer-real-browser` 的 `turnstile:true` 后台点击行为
+- token 读取会同时检查自定义 `cf-response` 与 Cloudflare 自带的 `cf-turnstile-response`
+- 当请求体设置 `"debugArtifacts": true` 时，失败会写入 `summary.json`、`html-summary.txt` 与 `screenshot.png`
+- Docker 容器内默认工件目录是 `/tmp/cf-bypass-artifacts`，可通过 `DEBUG_ARTIFACT_DIR` 覆盖
+- `turnstile_wait_token` 表示页面和浏览器已运行，但在超时时间内没有收到 Turnstile callback token
 
 `funcaptcha` 超时说明：
 
@@ -190,6 +223,14 @@ Turnstile：
 curl -sS -X POST 'http://127.0.0.1:8080/cloudflare' \
   -H 'Content-Type: application/json' \
   -d '{"domain":"https://example.com","siteKey":"<your-site-key>","mode":"turnstile"}'
+```
+
+Turnstile debug：
+
+```bash
+curl -sS -X POST 'http://127.0.0.1:8080/cloudflare' \
+  -H 'Content-Type: application/json' \
+  -d '{"domain":"https://example.com","siteKey":"<your-site-key>","mode":"turnstile","debugArtifacts":true}'
 ```
 
 FunCaptcha：

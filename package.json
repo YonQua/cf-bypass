@@ -7,8 +7,9 @@
     "dev": "nodemon index.js"
   },
   "dependencies": {
+    "cloakbrowser": "^0.3.27",
     "express": "^5.1.0",
-    "puppeteer-real-browser": "^1.4.0"
+    "puppeteer-core": "^24.43.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"

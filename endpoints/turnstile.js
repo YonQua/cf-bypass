@@ -1,95 +1,171 @@
 const { applyProxyAuthentication, applyRequestInterception } = require('../utils/browser')
 const { withTimeout } = require('../utils/async')
-const { createError } = require('../utils/errors')
+const { createError, isTimeoutError } = require('../utils/errors')
+const { createTurnstileDiagnostics } = require('../utils/turnstile/diagnostics')
+const { waitForTurnstileToken } = require('../utils/turnstile/solver')
 
-function escapeInlineScriptString(value) {
-  return String(value)
-    .replace(/\\/g, '\\\\')
-    .replace(/'/g, "\\'")
-    .replace(/\r/g, '\\r')
-    .replace(/\n/g, '\\n')
-    .replace(/<\/script/gi, '<\\/script')
+const DIAGNOSTIC_GRACE_MS = 2000
+
+function inlineScriptString(value) {
+  return JSON.stringify(String(value)).replace(/<\/script/gi, '<\\/script')
+}
+
+function normalizeDocumentUrl(value) {
+  const url = new URL(value)
+  url.hash = ''
+  url.hostname = url.hostname.toLowerCase()
+  if ((url.protocol === 'http:' && url.port === '80') || (url.protocol === 'https:' && url.port === '443')) {
+    url.port = ''
+  }
+  return `${url.protocol}//${url.host}${url.pathname || '/'}${url.search}`
+}
+
+function isTargetDocumentRequest(request, page, targetUrl) {
+  if (request.resourceType() !== 'document') return false
+  if (typeof request.isNavigationRequest === 'function' && !request.isNavigationRequest()) return false
+
+  try {
+    if (typeof request.frame === 'function' && request.frame() !== page.mainFrame()) return false
+    return normalizeDocumentUrl(request.url()) === normalizeDocumentUrl(targetUrl)
+  } catch {
+    return false
+  }
+}
+
+function buildSyntheticHtml(siteKey) {
+  return `
+    <!DOCTYPE html>
+    <html lang="en">
+    <body>
+      <div class="turnstile"></div>
+      <script>
+        window.__turnstileToken = null;
+        window.__storeTurnstileToken = function (token) {
+          window.__turnstileToken = token;
+          var input = document.querySelector('[name="cf-response"]');
+          if (!input) {
+            input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'cf-response';
+            document.body.appendChild(input);
+          }
+          input.value = token;
+        };
+        window.onloadTurnstileCallback = function () {
+          turnstile.render('.turnstile', {
+            sitekey: ${inlineScriptString(siteKey)},
+            callback: window.__storeTurnstileToken,
+          });
+        };
+      </script>
+      <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstileCallback" defer></script>
+    </body>
+    </html>
+  `
+}
+
+async function installSyntheticTurnstilePage(page, { domain, htmlContent, logger, requestId }) {
+  await applyRequestInterception(page, async (request) => {
+    if (isTargetDocumentRequest(request, page, domain)) {
+      await request.respond({
+        status: 200,
+        contentType: 'text/html',
+        body: htmlContent,
+      })
+      return
+    }
+
+    await request.continue()
+  }, {
+    logger,
+    logMeta: {
+      request_id: requestId,
+      mode: 'turnstile',
+    },
+  })
+}
+
+function hasDiagnosticDetail(error) {
+  return (
+    error?.detail?.label === 'Turnstile' &&
+    Object.prototype.hasOwnProperty.call(error.detail, 'apiScriptRequested')
+  )
 }
 
 async function turnstile(
-  { domain, proxy, siteKey, timeoutMs, defaultTimeoutMs, logger, requestId },
+  { domain, proxy, siteKey, timeoutMs, defaultTimeoutMs, logger, requestId, debugArtifacts },
   page
 ) {
   if (!domain) throw createError('Missing domain parameter', 400)
   if (!siteKey) throw createError('Missing siteKey parameter', 400)
 
   const timeout = Number(timeoutMs) || defaultTimeoutMs || 60000
-  const startTime = Date.now()
-  const escapedSiteKey = escapeInlineScriptString(siteKey)
+  const tokenTimeout = Math.max(1000, timeout - DIAGNOSTIC_GRACE_MS)
+  const startedAt = Date.now()
+  const diagnostics = createTurnstileDiagnostics({ page, requestId, logger, debugArtifacts })
+
+  async function throwWithDiagnostics(error, phase, options = {}) {
+    const detail = await diagnostics.captureFailure({
+      timeoutMs: timeout,
+      phase,
+      reason: error.message,
+    })
+    const code = options.code || Number(error?.code) || (isTimeoutError(error) ? 504 : 500)
+    const message = options.message || error.message || 'Turnstile failed'
+    throw createError(message, code, detail)
+  }
 
   const workPromise = (async () => {
     await applyProxyAuthentication(page, proxy)
 
-    const htmlContent = `
-      <!DOCTYPE html>
-      <html lang="en">
-      <body>
-        <div class="turnstile"></div>
-        <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstileCallback" defer></script>
-        <script>
-          window.onloadTurnstileCallback = function () {
-            turnstile.render('.turnstile', {
-              sitekey: '${escapedSiteKey}',
-              callback: function (token) {
-                var c = document.createElement('input');
-                c.type = 'hidden';
-                c.name = 'cf-response';
-                c.value = token;
-                document.body.appendChild(c);
-              },
-            });
-          };
-        </script>
-      </body>
-      </html>
-    `
-
-    await applyRequestInterception(page, async (request) => {
-      if ([domain, domain + '/'].includes(request.url()) && request.resourceType() === 'document') {
-        await request.respond({
-          status: 200,
-          contentType: 'text/html',
-          body: htmlContent,
-        })
-      } else {
-        await request.continue()
-      }
-    }, {
+    await installSyntheticTurnstilePage(page, {
+      domain,
+      htmlContent: buildSyntheticHtml(siteKey),
       logger,
-      logMeta: {
-        request_id: requestId,
-        mode: 'turnstile',
-      },
+      requestId,
     })
+    diagnostics.attach()
 
-    await page.goto(domain, { waitUntil: 'domcontentloaded', timeout })
+    try {
+      await page.goto(domain, { waitUntil: 'domcontentloaded', timeout })
+    } catch (error) {
+      await throwWithDiagnostics(error, 'turnstile_page_load')
+    }
 
-    await page.waitForSelector('[name="cf-response"]', { timeout })
-
-    const token = await page.evaluate(() => {
-      try {
-        return document.querySelector('[name="cf-response"]').value
-      } catch {
-        return null
-      }
-    })
+    let token
+    try {
+      token = await waitForTurnstileToken(page, {
+        timeoutMs: tokenTimeout,
+        diagnostics,
+      })
+    } catch (error) {
+      await throwWithDiagnostics(error, 'turnstile_wait_token', {
+        code: 504,
+        message: `Turnstile timeout after ${timeout}ms`,
+      })
+    }
 
     const userAgent = await page.evaluate(() => navigator.userAgent).catch(() => null)
+    if (!token || token.length < 10) {
+      await throwWithDiagnostics(new Error('Failed to get token'), 'turnstile_token_invalid')
+    }
 
-    if (!token || token.length < 10) throw new Error('Failed to get token')
     return {
       token,
       user_agent: userAgent,
-      elapsed_time: (Date.now() - startTime) / 1000,
+      elapsed_time: (Date.now() - startedAt) / 1000,
     }
   })()
 
-  return withTimeout(workPromise, timeout, 'Turnstile')
+  try {
+    return await withTimeout(workPromise, timeout + DIAGNOSTIC_GRACE_MS, 'Turnstile', {
+      phase: 'turnstile_execute',
+      message: `Turnstile timeout after ${timeout}ms`,
+    })
+  } catch (error) {
+    if (hasDiagnosticDetail(error)) throw error
+    await throwWithDiagnostics(error, error?.detail?.phase || 'turnstile_execute')
+  }
 }
 
 module.exports = turnstile

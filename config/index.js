@@ -12,7 +12,7 @@ function parseBooleanEnv(value, defaultValue) {
 }
 
 module.exports = {
-  port: Number(process.env.PORT) || 8081,
+  port: Number(process.env.PORT) || 8080,
   authToken: process.env.authToken || null,
   browserLimit: Number(process.env.browserLimit) || 20,
   requestTimeoutMs: Number(process.env.timeOut) || 60000,
@@ -21,6 +21,14 @@ module.exports = {
   logTimeZone: process.env.LOG_TIMEZONE || 'Asia/Shanghai',
   logLevel: process.env.LOG_LEVEL || 'info',
   allowPrivateNetworkTargets: parseBooleanEnv(process.env.ALLOW_PRIVATE_NETWORK_TARGETS, true),
+  cloakbrowser: {
+    headless: parseBooleanEnv(process.env.CLOAKBROWSER_HEADLESS, false),
+    humanize: parseBooleanEnv(process.env.CLOAKBROWSER_HUMANIZE, true),
+    stealthArgs: parseBooleanEnv(process.env.CLOAKBROWSER_STEALTH_ARGS, true),
+    fingerprintSeed: process.env.CLOAKBROWSER_FINGERPRINT_SEED || null,
+    timezone: process.env.CLOAKBROWSER_TIMEZONE || null,
+    locale: process.env.CLOAKBROWSER_LOCALE || null,
+  },
   cache: {
     dir: CACHE_DIR,
     file: CACHE_FILE,
