@@ -35,12 +35,6 @@ npm run dev
 docker compose up --build -d
 ```
 
-如果宿主机 `8080` 已被占用，可只改宿主机端口，容器内仍监听 `8080`：
-
-```bash
-HOST_PORT=18080 docker compose up --build -d
-```
-
 默认命名：
 
 - 镜像：`cf-bypass:latest`
