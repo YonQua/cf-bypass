@@ -106,7 +106,7 @@ CloakBrowser 说明：
 
 Turnstile 超时排障说明：
 
-- 默认会在失败日志与错误 detail 中记录 `apiScriptRequested`、`apiScriptLoaded`、`apiScriptStatus`、`turnstileIframeCount`、`consoleErrorCount`、`currentUrl`、`pageTitle`
+- 默认会在失败日志与错误 detail 中记录 `apiScriptRequested`、`apiScriptLoaded`、`apiScriptStatus`、`turnstileStatusCounts`、`turnstileNonOkResponses`、`turnstileIframeCount`、`consoleErrorCount`、`currentUrl`、`pageTitle`
 - Turnstile 会循环检测并点击 `cf-turnstile-response` 父节点、Turnstile iframe、widget 容器及典型 300px challenge 区域，替代旧版 `puppeteer-real-browser` 的 `turnstile:true` 后台点击行为
 - token 读取会同时检查自定义 `cf-response` 与 Cloudflare 自带的 `cf-turnstile-response`
 - 当请求体设置 `"debugArtifacts": true` 时，失败会写入 `summary.json`、`html-summary.txt` 与 `screenshot.png`

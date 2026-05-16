@@ -36,6 +36,22 @@ function isTurnstileUrl(url) {
   return url.includes('challenges.cloudflare.com') || url.includes('cloudflare.com/turnstile')
 }
 
+function classifyTurnstileEndpoint(url) {
+  try {
+    const parsed = new URL(url)
+    const pathName = parsed.pathname
+    if (isTurnstileApiUrl(url)) return 'api_js'
+    if (pathName.includes('/turnstile/')) return 'challenge_frame'
+    if (pathName.includes('/flow/')) return 'flow'
+    if (pathName.includes('/pat/')) return 'pat'
+    if (pathName.includes('/cmg/')) return 'cmg'
+    if (pathName.includes('/d/')) return 'diagnostic_image'
+    return 'other'
+  } catch {
+    return 'other'
+  }
+}
+
 function createState() {
   return {
     apiScriptRequested: false,
@@ -49,8 +65,36 @@ function createState() {
     turnstileRequests: [],
     solverAttempts: 0,
     solverClicks: 0,
+    solverExecutes: 0,
+    solverLastState: null,
     solverLastCandidates: [],
     solverLastError: null,
+  }
+}
+
+function summarizeTurnstileResponses(turnstileRequests) {
+  const statusCounts = {}
+  const nonOkResponses = []
+
+  for (const entry of turnstileRequests) {
+    if (entry.event !== 'response') continue
+
+    const statusKey = String(entry.status)
+    statusCounts[statusKey] = (statusCounts[statusKey] || 0) + 1
+
+    if (entry.status >= 400) {
+      nonOkResponses.push({
+        endpoint: classifyTurnstileEndpoint(entry.url),
+        status: entry.status,
+        resourceType: entry.resourceType,
+      })
+    }
+  }
+
+  return {
+    requestCount: turnstileRequests.length,
+    statusCounts,
+    nonOkResponses: nonOkResponses.slice(-8),
   }
 }
 
@@ -65,6 +109,12 @@ async function capturePageState(page) {
           typeof turnstileInput?.value === 'string' ? turnstileInput.value.trim() : ''
         const syntheticToken =
           typeof window.__turnstileToken === 'string' ? window.__turnstileToken.trim() : ''
+        const turnstileResponse =
+          typeof window.turnstile?.getResponse === 'function' &&
+          window.__turnstileWidgetId !== null &&
+          window.__turnstileWidgetId !== undefined
+            ? String(window.turnstile.getResponse(window.__turnstileWidgetId) || '').trim()
+            : ''
         const html = document.documentElement?.outerHTML || ''
         const bodyText = document.body?.innerText || ''
 
@@ -73,12 +123,20 @@ async function capturePageState(page) {
           pageTitle: document.title || null,
           apiObjectPresent: typeof window.turnstile === 'object',
           renderFunctionPresent: typeof window.turnstile?.render === 'function',
+          executeFunctionPresent: typeof window.turnstile?.execute === 'function',
           callbackFunctionPresent: typeof window.onloadTurnstileCallback === 'function',
+          widgetIdPresent: window.__turnstileWidgetId !== null && window.__turnstileWidgetId !== undefined,
+          shouldExecute: window.__turnstileShouldExecute === true,
+          turnstileLastError:
+            typeof window.__turnstileLastError === 'string' && window.__turnstileLastError.length > 0
+              ? window.__turnstileLastError
+              : null,
           hiddenInputPresent: Boolean(tokenInput),
           tokenValueLength: tokenValue.length,
           turnstileResponseInputPresent: Boolean(turnstileInput),
           turnstileResponseValueLength: turnstileValue.length,
           syntheticTokenValueLength: syntheticToken.length,
+          getResponseValueLength: turnstileResponse.length,
           turnstileContainerCount: document.querySelectorAll('.turnstile, [data-sitekey]').length,
           turnstileIframeCount: document.querySelectorAll(
             'iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[title*="challenge" i]'
@@ -101,6 +159,8 @@ async function capturePageState(page) {
 }
 
 function buildDetail({ timeoutMs, phase, state, pageState, artifactDir }) {
+  const turnstileNetwork = summarizeTurnstileResponses(state.turnstileRequests)
+
   return {
     timeoutMs,
     label: 'Turnstile',
@@ -109,6 +169,9 @@ function buildDetail({ timeoutMs, phase, state, pageState, artifactDir }) {
     apiScriptLoaded: state.apiScriptLoaded,
     apiScriptStatus: state.apiScriptStatus,
     apiScriptFailed: state.apiScriptFailed,
+    turnstileRequestCount: turnstileNetwork.requestCount,
+    turnstileStatusCounts: turnstileNetwork.statusCounts,
+    turnstileNonOkResponses: turnstileNetwork.nonOkResponses,
     consoleErrorCount: state.consoleErrors.length,
     pageErrorCount: state.pageErrors.length,
     failedRequestCount: state.failedRequests.length,
@@ -116,15 +179,22 @@ function buildDetail({ timeoutMs, phase, state, pageState, artifactDir }) {
     pageTitle: pageState?.pageTitle,
     apiObjectPresent: pageState?.apiObjectPresent,
     renderFunctionPresent: pageState?.renderFunctionPresent,
+    executeFunctionPresent: pageState?.executeFunctionPresent,
     callbackFunctionPresent: pageState?.callbackFunctionPresent,
+    widgetIdPresent: pageState?.widgetIdPresent,
+    shouldExecute: pageState?.shouldExecute,
+    turnstileLastError: pageState?.turnstileLastError,
     turnstileIframeCount: pageState?.turnstileIframeCount,
     turnstileContainerCount: pageState?.turnstileContainerCount,
     hiddenInputPresent: pageState?.hiddenInputPresent,
     tokenValueLength: pageState?.tokenValueLength,
     turnstileResponseInputPresent: pageState?.turnstileResponseInputPresent,
     turnstileResponseValueLength: pageState?.turnstileResponseValueLength,
+    getResponseValueLength: pageState?.getResponseValueLength,
     solverAttempts: state.solverAttempts,
     solverClicks: state.solverClicks,
+    solverExecutes: state.solverExecutes,
+    solverLastState: state.solverLastState,
     solverLastCandidates: state.solverLastCandidates,
     solverLastError: state.solverLastError,
     ...(artifactDir ? { artifactDir } : {}),
@@ -215,6 +285,14 @@ function createTurnstileDiagnostics({ page, requestId, logger, debugArtifacts })
     state.solverClicks += 1
   }
 
+  function recordSolverExecute() {
+    state.solverExecutes += 1
+  }
+
+  function recordSolverState(turnstileState) {
+    state.solverLastState = turnstileState
+  }
+
   function recordSolverError(error) {
     state.solverLastError = error.message
     logger?.debug?.('event=turnstile_solver_click_failed', {
@@ -288,7 +366,11 @@ function createTurnstileDiagnostics({ page, requestId, logger, debugArtifacts })
       api_script_requested: detail.apiScriptRequested,
       api_script_loaded: detail.apiScriptLoaded,
       api_script_status: detail.apiScriptStatus,
+      turnstile_status_counts: detail.turnstileStatusCounts,
+      turnstile_non_ok_responses: detail.turnstileNonOkResponses,
       turnstile_iframe_count: detail.turnstileIframeCount,
+      widget_id_present: detail.widgetIdPresent,
+      turnstile_last_error: detail.turnstileLastError,
       hidden_input_present: detail.hiddenInputPresent,
       token_value_length: detail.tokenValueLength,
       console_error_count: detail.consoleErrorCount,
@@ -300,6 +382,7 @@ function createTurnstileDiagnostics({ page, requestId, logger, debugArtifacts })
       turnstile_response_value_length: detail.turnstileResponseValueLength,
       solver_attempts: detail.solverAttempts,
       solver_clicks: detail.solverClicks,
+      solver_executes: detail.solverExecutes,
       artifact_dir: artifactDir,
     })
 
@@ -311,6 +394,8 @@ function createTurnstileDiagnostics({ page, requestId, logger, debugArtifacts })
     captureFailure,
     recordSolverAttempt,
     recordSolverClick,
+    recordSolverExecute,
+    recordSolverState,
     recordSolverError,
   }
 }
