@@ -34,8 +34,6 @@ services:
       - CLOAKBROWSER_LOCALE=en-US
       - CLOAKBROWSER_AUTO_UPDATE=false
       - CLOAKBROWSER_CACHE_DIR=/app/.cloakbrowser
-      # 跳过Puppeteer自动下载Chromium
-      - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
     # 共享内存大小：Chrome需要较大共享内存
     shm_size: '2gb'
     # 初始化进程：处理僵尸进程

@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - `proxy` 请求参数现在统一为 `{"url", "username", "password"}` 形态，不再接受旧的 `hostname` / `port` 拆分格式
+- `cloakbrowser` 依赖精确锁定为 `0.3.21`，使 Linux Docker 默认使用 Chromium `145.0.7632.159.9`，避免自动落到 `Chrome/146`
 - 浏览器主线收敛为 CloakBrowser-only，移除 `puppeteer-real-browser` 依赖与系统 Chromium 143 回退路径
 - Docker Compose 默认通过 Xvfb 运行 headful CloakBrowser，并固定 fingerprint seed、timezone 与 locale
 - Docker 构建阶段预下载 CloakBrowser binary，并将该层前移到源码复制之前以复用构建缓存，同时补充 emoji / 扩展字体包以降低 font/canvas 指纹异常

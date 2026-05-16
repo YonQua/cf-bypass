@@ -63,6 +63,7 @@ docker compose up --build -d
 | `CLOAKBROWSER_LOCALE`           | `null`          | 可选 BCP 47 locale，例如 `en-US`                             |
 | `CLOAKBROWSER_AUTO_UPDATE`      | `false`         | Docker 镜像默认禁用 CloakBrowser 自动更新检查，避免版本漂移  |
 | `CLOAKBROWSER_CACHE_DIR`        | `/app/.cloakbrowser` | Docker 镜像内 CloakBrowser binary 缓存目录              |
+| `CLOAKBROWSER_BINARY_PATH`      | `null`          | 可选指定本地 CloakBrowser binary；设置后会跳过默认版本映射   |
 
 日志级别说明：
 
@@ -74,8 +75,10 @@ docker compose up --build -d
 CloakBrowser 说明：
 
 - 当前主线只保留 CloakBrowser，不再内置 `puppeteer-real-browser` 或系统 Chromium 回退路径
+- 当前 `cloakbrowser` 依赖精确锁定为 `0.3.21`，Linux x64 默认下载 Chromium `145.0.7632.159.9`，避免自动升级到 `Chrome/146`
 - Docker Compose 使用 `xvfb-run -a npm start` 启动 headful CloakBrowser，以贴近真实桌面浏览器环境
 - Docker Compose 默认固定 `CLOAKBROWSER_FINGERPRINT_SEED=cf-bypass-poc-001`，避免同一出口连续请求时每次表现为全新设备
+- 如需后续切换到其他 CloakBrowser binary，可通过 `CLOAKBROWSER_BINARY_PATH=/app/.cloakbrowser/chromium-<version>/chrome` 显式指定；该路径必须在容器内真实存在
 - CloakBrowser binary 受其独立 Binary License 约束；内部授权测试可用，若作为第三方浏览器服务提供需先确认 OEM/SaaS 授权
 
 ## API
