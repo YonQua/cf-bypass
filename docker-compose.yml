@@ -20,11 +20,11 @@ services:
       # 服务端口
       - PORT=8080
       # 最大并发浏览器数量
-      - browserLimit=3
+      - BROWSER_LIMIT=3
       # 超时时间（毫秒）
-      - timeOut=90000
+      - REQUEST_TIMEOUT_MS=90000
       # API认证令牌（留空表示不需要）
-      - authToken=
+      - AUTH_TOKEN=
       # CloakBrowser 固定指纹与地区参数，降低同一出口反复表现为新设备的概率
       - CLOAKBROWSER_HEADLESS=false
       - CLOAKBROWSER_HUMANIZE=true

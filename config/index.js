@@ -11,23 +11,38 @@ function parseBooleanEnv(value, defaultValue) {
   return defaultValue
 }
 
+function readEnv(name) {
+  const value = process.env[name]
+  return value != null && String(value).trim() !== '' ? value : null
+}
+
+function parseNumberEnv(name, defaultValue) {
+  const raw = readEnv(name)
+  if (raw == null) return defaultValue
+  const value = Number(raw)
+  return Number.isFinite(value) && value > 0 ? value : defaultValue
+}
+
 module.exports = {
-  port: Number(process.env.PORT) || 8080,
-  authToken: process.env.authToken || null,
-  browserLimit: Number(process.env.browserLimit) || 20,
-  requestTimeoutMs: Number(process.env.timeOut) || 60000,
-  browserCloseTimeoutMs: Math.max(1000, Number(process.env.browserCloseTimeoutMs) || 5000),
-  shutdownTimeoutMs: Math.max(10000, Number(process.env.timeOut) || 60000),
-  logTimeZone: process.env.LOG_TIMEZONE || 'Asia/Shanghai',
-  logLevel: process.env.LOG_LEVEL || 'info',
-  allowPrivateNetworkTargets: parseBooleanEnv(process.env.ALLOW_PRIVATE_NETWORK_TARGETS, true),
+  port: parseNumberEnv('PORT', 8080),
+  authToken: readEnv('AUTH_TOKEN'),
+  browserLimit: parseNumberEnv('BROWSER_LIMIT', 20),
+  requestTimeoutMs: parseNumberEnv('REQUEST_TIMEOUT_MS', 60000),
+  browserCloseTimeoutMs: Math.max(
+    1000,
+    parseNumberEnv('BROWSER_CLOSE_TIMEOUT_MS', 5000)
+  ),
+  shutdownTimeoutMs: Math.max(10000, parseNumberEnv('SHUTDOWN_TIMEOUT_MS', 60000)),
+  logTimeZone: readEnv('LOG_TIMEZONE') || 'Asia/Shanghai',
+  logLevel: readEnv('LOG_LEVEL') || 'info',
+  allowPrivateNetworkTargets: parseBooleanEnv(readEnv('ALLOW_PRIVATE_NETWORK_TARGETS'), true),
   cloakbrowser: {
-    headless: parseBooleanEnv(process.env.CLOAKBROWSER_HEADLESS, false),
-    humanize: parseBooleanEnv(process.env.CLOAKBROWSER_HUMANIZE, true),
-    stealthArgs: parseBooleanEnv(process.env.CLOAKBROWSER_STEALTH_ARGS, true),
-    fingerprintSeed: process.env.CLOAKBROWSER_FINGERPRINT_SEED || null,
-    timezone: process.env.CLOAKBROWSER_TIMEZONE || null,
-    locale: process.env.CLOAKBROWSER_LOCALE || null,
+    headless: parseBooleanEnv(readEnv('CLOAKBROWSER_HEADLESS'), false),
+    humanize: parseBooleanEnv(readEnv('CLOAKBROWSER_HUMANIZE'), true),
+    stealthArgs: parseBooleanEnv(readEnv('CLOAKBROWSER_STEALTH_ARGS'), true),
+    fingerprintSeed: readEnv('CLOAKBROWSER_FINGERPRINT_SEED'),
+    timezone: readEnv('CLOAKBROWSER_TIMEZONE'),
+    locale: readEnv('CLOAKBROWSER_LOCALE'),
   },
   cache: {
     dir: CACHE_DIR,

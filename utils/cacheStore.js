@@ -14,16 +14,7 @@ function createCacheStore({
   let dirtyDuringFlush = false
   let debounceTimer = null
   let intervalTimer = null
-
-  function logInfo(message) {
-    if (logger?.debug) {
-      logger.debug(message)
-      return
-    }
-    if (logger?.log) {
-      logger.log(message)
-    }
-  }
+  let stopped = false
 
   function logWarn(message, error) {
     if (!logger?.warn) return
@@ -31,6 +22,7 @@ function createCacheStore({
   }
 
   function markDirty() {
+    if (stopped) return
     if (flushing) {
       dirtyDuringFlush = true
     } else {
@@ -61,7 +53,7 @@ function createCacheStore({
       }
       const removed = purgeExpired(Date.now())
       if (removed > 0) {
-        logInfo(`event=cache_purge removed=${removed}`)
+        logger?.debug?.(`event=cache_purge removed=${removed}`)
         markDirty()
       }
     } catch (error) {
@@ -92,6 +84,7 @@ function createCacheStore({
   }
 
   function scheduleFlush() {
+    if (stopped) return
     if (debounceTimer) clearTimeout(debounceTimer)
     debounceTimer = setTimeout(() => {
       debounceTimer = null
@@ -119,11 +112,12 @@ function createCacheStore({
   }
 
   async function start() {
+    stopped = false
     await loadFromDisk()
     intervalTimer = setInterval(() => {
       const removed = purgeExpired(Date.now())
       if (removed > 0) {
-        logInfo(`event=cache_purge removed=${removed}`)
+        logger?.debug?.(`event=cache_purge removed=${removed}`)
         markDirty()
       }
       flushToDisk()
@@ -134,8 +128,16 @@ function createCacheStore({
   }
 
   async function stop() {
-    if (intervalTimer) clearInterval(intervalTimer)
-    if (debounceTimer) clearTimeout(debounceTimer)
+    if (stopped) return
+    stopped = true
+    if (intervalTimer) {
+      clearInterval(intervalTimer)
+      intervalTimer = null
+    }
+    if (debounceTimer) {
+      clearTimeout(debounceTimer)
+      debounceTimer = null
+    }
     await flushToDisk()
   }
 

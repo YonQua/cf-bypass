@@ -1,9 +1,9 @@
 const { applyProxyAuthentication } = require('../utils/browser')
 const { createError } = require('../utils/errors')
+const { sleep, withTimeout } = require('../utils/async')
+const { clickIuamTurnstileOnce } = require('../utils/turnstile/clicker')
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
+const IUAM_EXECUTE_GRACE_MS = 5000
 
 function isChallengePlatformUrl(url) {
   return typeof url === 'string' && url.includes('/cdn-cgi/challenge-platform/')
@@ -77,40 +77,11 @@ async function cloudflare(data, page) {
       async function clickTurnstile() {
         const nowMs = Date.now()
         if (nowMs - lastClickAtMs < clickCooldownMs) return
+        lastClickAtMs = nowMs
+        if (page.__iuamBackgroundClickAttempted) return
 
         try {
-          const iframeElements = await page.$$('iframe[src*="challenges.cloudflare.com"]')
-          if (!iframeElements || iframeElements.length === 0) return
-
-          let bestIframe = null
-          let bestArea = 0
-          for (const iframe of iframeElements) {
-            const rect = await iframe.boundingBox().catch(() => null)
-            if (!rect) continue
-            const area = rect.width * rect.height
-            if (area > bestArea) {
-              bestIframe = iframe
-              bestArea = area
-            }
-          }
-          if (!bestIframe) return
-
-          await bestIframe
-            .evaluate((el) => {
-              try {
-                el.scrollIntoView({ block: 'center', inline: 'center' })
-              } catch {}
-            })
-            .catch(() => {})
-
-          const rect = await bestIframe.boundingBox().catch(() => null)
-          if (!rect) return
-
-          lastClickAtMs = nowMs
-
-          const x = rect.x + rect.width / 2 + (Math.random() * 10 - 5)
-          const y = rect.y + rect.height / 2 + (Math.random() * 10 - 5)
-          await page.mouse.click(x, y, { delay: 30 })
+          await clickIuamTurnstileOnce(page)
         } catch {}
       }
 
@@ -125,13 +96,16 @@ async function cloudflare(data, page) {
           const cookies = await page.cookies().catch(() => [])
           const cfCookie = cookies.find((c) => c.name === 'cf_clearance')
           if (cfCookie?.value && cfCookie.value === latestStrictClearance) {
+            const backgroundClickAttempted = Boolean(page.__iuamBackgroundClickAttempted)
             return {
               cf_clearance: latestStrictClearance,
               user_agent: userAgent,
               elapsed_time: (nowMs - startedAtMs) / 1000,
               _meta: {
-                enteredClickMode: false,
-                clearanceSource: 'strict_cookie_match',
+                enteredClickMode: backgroundClickAttempted,
+                clearanceSource: backgroundClickAttempted
+                  ? 'background_click_strict_cookie_match'
+                  : 'strict_cookie_match',
               },
             }
           }
@@ -201,7 +175,9 @@ async function cloudflare(data, page) {
     }
   })()
 
-  return workPromise
+  return withTimeout(workPromise, timeoutMs + IUAM_EXECUTE_GRACE_MS, 'IUAM', {
+    phase: 'iuam_execute',
+  })
 }
 
 module.exports = cloudflare

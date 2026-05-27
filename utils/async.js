@@ -1,5 +1,9 @@
 const { createError } = require('./errors')
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 // 统一超时控制，超时直接抛错，便于上层统一处理
 function withTimeout(promise, timeoutMs, label, options = {}) {
   const safeTimeoutMs = Number(timeoutMs) || 60000
@@ -22,4 +26,4 @@ function withTimeout(promise, timeoutMs, label, options = {}) {
   })
 }
 
-module.exports = { withTimeout }
+module.exports = { sleep, withTimeout }

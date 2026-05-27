@@ -1,5 +1,8 @@
 const config = require('../config')
 const { withTimeout } = require('./async')
+const { createIuamBrowser: launchIuamBrowser } = require('./iuamBrowser')
+
+let cloakbrowserBinaryPathPromise
 
 async function applyProxyAuthentication(page, proxy) {
   if (page?.__proxyAuthenticationHandled) return
@@ -59,7 +62,15 @@ function buildCloakbrowserArgs() {
   return args
 }
 
-async function createBrowser({ proxy, timeoutMs }) {
+async function getCloakbrowserBinaryPath() {
+  if (process.env.CLOAKBROWSER_BINARY_PATH) return process.env.CLOAKBROWSER_BINARY_PATH
+  if (!cloakbrowserBinaryPathPromise) {
+    cloakbrowserBinaryPathPromise = import('cloakbrowser').then(({ ensureBinary }) => ensureBinary())
+  }
+  return cloakbrowserBinaryPathPromise
+}
+
+async function createCloakBrowser({ proxy, timeoutMs }) {
   const requestTimeoutMs = Number(timeoutMs) || 60000
   const { launch } = await import('cloakbrowser/puppeteer')
 
@@ -84,7 +95,26 @@ async function createBrowser({ proxy, timeoutMs }) {
   })
   page.__proxyAuthenticationHandled = Boolean(proxy?.username && proxy?.password)
 
-  return { browser, page }
+  return { browser, page, provider: 'cloakbrowser' }
+}
+
+async function createIuamBrowser({ proxy, timeoutMs }) {
+  const requestTimeoutMs = Number(timeoutMs) || 60000
+  const chromePath = await getCloakbrowserBinaryPath()
+
+  return withTimeout(
+    launchIuamBrowser({ proxy, chromePath }),
+    requestTimeoutMs,
+    'browser connect'
+  )
+}
+
+async function createBrowser({ proxy, timeoutMs, mode }) {
+  if (mode === 'iuam') {
+    return createIuamBrowser({ proxy, timeoutMs })
+  }
+
+  return createCloakBrowser({ proxy, timeoutMs })
 }
 
 async function closeBrowser(browser, options = {}) {

@@ -2,15 +2,15 @@
 
 > 当前版本：`v1.0.0`（当前工作树包含未发布的 `funcaptcha` lab 模式）
 
-一个基于 Node.js 与 CloakBrowser Chromium 的 Cloudflare IUAM / Turnstile / lab-only FunCaptcha 处理服务，用于在授权测试或受控环境中获取 `cf_clearance`、Turnstile token，或受控页面中的 `arkose_labs_token`。项目目标是保持接口简单、部署直接、日志可排障。
+一个基于 Node.js、CloakBrowser Chromium 与 IUAM 兼容浏览器路径的 Cloudflare IUAM / Turnstile / lab-only FunCaptcha 处理服务，用于在授权测试或受控环境中获取 `cf_clearance`、Turnstile token，或受控页面中的 `arkose_labs_token`。项目目标是保持接口简单、部署直接、日志可排障。
 
 ## 功能特性
 
 - 支持 `iuam`、`turnstile` 与 `funcaptcha` 三种模式
 - 支持对象形式的 HTTP / HTTPS 代理，并兼容部分 `socks5://` 传输场景
-- IUAM 请求支持缓存、严格链路优先与点击兜底
+- IUAM 请求支持缓存、严格链路优先，并通过仓库内 `iuam-rebrowser` provider 与共享 Turnstile clicker 处理需要点击的 managed challenge
 - `funcaptcha` 模式支持打开受控页面并读取 `arkose_labs_token`
-- 使用 `cloakbrowser/puppeteer` 启动 CloakBrowser stealth Chromium binary
+- `turnstile` 与 `funcaptcha` 使用 `cloakbrowser/puppeteer` 启动 CloakBrowser stealth Chromium binary
 - 提供结构化日志与 `GET /health` 健康检查
 - 提供 Docker Compose 部署配置
 
@@ -48,10 +48,11 @@ docker compose up --build -d
 | ------------------------------- | --------------- | ------------------------------------------------------------ |
 | `PORT`                          | `8080`          | 服务监听端口                                                 |
 | `HOST_PORT`                     | `8080`          | Docker Compose 宿主机映射端口，不影响容器内 `PORT`           |
-| `authToken`                     | `null`          | 可选的接口认证 Token                                         |
-| `browserLimit`                  | `20`            | 最大浏览器并发数；Docker Compose 默认设为 `3`                |
-| `timeOut`                       | `60000`         | 全局请求超时（毫秒）；Docker Compose 默认设为 `90000`         |
-| `browserCloseTimeoutMs`         | `5000`          | 单次请求结束后等待浏览器关闭的最长时间，避免收尾拖长响应     |
+| `AUTH_TOKEN`                    | `null`          | 可选的接口认证 Token                                         |
+| `BROWSER_LIMIT`                 | `20`            | 最大浏览器并发数；Docker Compose 默认设为 `3`                |
+| `REQUEST_TIMEOUT_MS`            | `60000`         | 全局请求超时（毫秒）；Docker Compose 默认设为 `90000`         |
+| `BROWSER_CLOSE_TIMEOUT_MS`      | `5000`          | 单次请求结束后等待浏览器关闭的最长时间                       |
+| `SHUTDOWN_TIMEOUT_MS`           | `60000`         | 服务优雅退出总超时，独立于请求超时                           |
 | `LOG_LEVEL`                     | `info`          | 日志级别：`debug` / `info` / `warn` / `error`                |
 | `LOG_TIMEZONE`                  | `Asia/Shanghai` | 日志时区（IANA）                                             |
 | `ALLOW_PRIVATE_NETWORK_TARGETS` | `true`          | 是否允许 `localhost`、私网、回环、链路本地字面量地址作为目标 |
@@ -72,9 +73,11 @@ docker compose up --build -d
 - logger 会自动省略 `null` / `undefined` 字段，避免成功日志被空值刷屏
 - 摘要日志中的 `target` 会保留协议、主机与路径，但默认省略 query / hash，兼顾定位与降噪
 
-CloakBrowser 说明：
+浏览器运行时说明：
 
-- 当前主线只保留 CloakBrowser，不再内置 `puppeteer-real-browser` 或系统 Chromium 回退路径
+- `iuam` 模式使用仓库内 `iuam-rebrowser` provider：`rebrowser-puppeteer-core` 连接 `chrome-launcher` 启动的 headful Chromium，并通过 `ghost-cursor` / Xvfb 环境保留真实桌面交互能力
+- IUAM managed challenge 点击由 provider 的早期后台循环与 `/cloudflare` IUAM 状态机兜底共同处理，两者复用 `utils/turnstile/clicker.js` 的候选发现逻辑
+- `turnstile` 与 `funcaptcha` 模式使用 CloakBrowser，不再内置系统 Chromium 回退路径
 - 当前 `cloakbrowser` 依赖精确锁定为 `0.3.21`，Linux x64 默认下载 Chromium `145.0.7632.159.9`，避免自动升级到 `Chrome/146`
 - Docker Compose 使用 `xvfb-run -a npm start` 启动 headful CloakBrowser，以贴近真实桌面浏览器环境
 - Docker Compose 默认固定 `CLOAKBROWSER_FINGERPRINT_SEED=cf-bypass-poc-001`，避免同一出口连续请求时每次表现为全新设备
@@ -99,7 +102,7 @@ CloakBrowser 说明：
 - `mode`：必填，`iuam`、`turnstile` 或 `funcaptcha`
 - `domain`：必填，必须是合法的 `http://` 或 `https://` URL，且不能包含用户名/密码
 - `siteKey`：`turnstile` 模式必填
-- `timeoutMs`：可选，本次请求超时，优先于全局 `timeOut`
+- `timeoutMs`：可选，本次请求超时，优先于全局 `REQUEST_TIMEOUT_MS`
 - `cache`：可选，仅对 `iuam` 生效；设为 `false` 时跳过缓存
 - `debugArtifacts`：可选，仅建议排障时设为 `true`；`turnstile` 失败时会输出页面诊断工件路径
 - `proxy`：可选，代理对象格式如下
@@ -107,7 +110,7 @@ CloakBrowser 说明：
 Turnstile 超时排障说明：
 
 - 默认会在失败日志与错误 detail 中记录 `apiScriptRequested`、`apiScriptLoaded`、`apiScriptStatus`、`turnstileStatusCounts`、`turnstileNonOkResponses`、`turnstileIframeCount`、`consoleErrorCount`、`currentUrl`、`pageTitle`
-- Turnstile 会循环检测并点击 `cf-turnstile-response` 父节点、Turnstile iframe、widget 容器及典型 300px challenge 区域，替代旧版 `puppeteer-real-browser` 的 `turnstile:true` 后台点击行为
+- Turnstile 会循环检测并点击 `cf-turnstile-response` 父节点、Turnstile iframe、widget 容器及典型 300px challenge 区域，替代旧版外部 wrapper 的后台点击行为
 - token 读取会同时检查自定义 `cf-response` 与 Cloudflare 自带的 `cf-turnstile-response`
 - 当请求体设置 `"debugArtifacts": true` 时，失败会写入 `summary.json`、`html-summary.txt` 与 `screenshot.png`
 - Docker 容器内默认工件目录是 `/tmp/cf-bypass-artifacts`，可通过 `DEBUG_ARTIFACT_DIR` 覆盖
@@ -119,7 +122,7 @@ Turnstile 超时排障说明：
 - 若页面直接渲染出 reCAPTCHA 而非 `arkose_labs_token`，会快速返回 `422`，并标记为 `funcaptcha_recaptcha_present`
 - 若页面已打开但 `arkose_labs_token` 一直未出现或为空，日志与错误会标记为 `funcaptcha_wait_token`
 - `funcaptcha_wait_token` 的错误 detail 会尽量附带当前页面快照，例如 `currentUrl`、`pageTitle`、`hasArkoseForm`、`tokenInputPresent`
-- 请求结束后的浏览器关闭阶段受 `browserCloseTimeoutMs` 限制；即使关闭卡住，也不会继续无限拖长主请求
+- 请求结束后的浏览器关闭阶段受 `BROWSER_CLOSE_TIMEOUT_MS` 限制；即使关闭卡住，也不会继续无限拖长主请求
 
 ```json
 {
