@@ -6,12 +6,51 @@ const { createBrowser, closeBrowser } = require('./utils/browser')
 const { createCacheStore } = require('./utils/cacheStore')
 const { createSemaphore } = require('./utils/semaphore')
 const { normalizeUrl, validateDomain } = require('./utils/domain')
+const { withTimeout } = require('./utils/async')
+const { openApiDocument, docsHtml } = require('./openapi')
+const turnstile = require('./endpoints/turnstile')
+const funcaptcha = require('./endpoints/funcaptcha')
+const iuam = require('./endpoints/cloudflare')
 
 const app = express()
 const port = config.port
 const authToken = config.authToken
-const SUPPORTED_MODES = new Set(['turnstile', 'funcaptcha', 'iuam'])
+const SOLVERS = { turnstile, funcaptcha, iuam }
+const BROWSER_PLATFORMS = new Set(['windows', 'macos', 'linux'])
 let requestCounter = 0
+const MIN_REQUEST_TIMEOUT_MS = 1000
+const MAX_REQUEST_TIMEOUT_MS = 300000
+
+function parseRequestTimeout(value) {
+  if (value == null || value === '') return config.requestTimeoutMs
+  const timeoutMs = Number(value)
+  if (
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs < MIN_REQUEST_TIMEOUT_MS ||
+    timeoutMs > MAX_REQUEST_TIMEOUT_MS
+  ) {
+    throw createError(
+      `Bad Request: timeoutMs must be an integer between ${MIN_REQUEST_TIMEOUT_MS} and ${MAX_REQUEST_TIMEOUT_MS}`,
+      400
+    )
+  }
+  return timeoutMs
+}
+
+function parseBrowserPlatform(value) {
+  if (value == null || value === '') return 'windows'
+  if (typeof value !== 'string' || !BROWSER_PLATFORMS.has(value)) {
+    throw createError(
+      'Bad Request: browserPlatform must be one of windows, macos, linux',
+      400
+    )
+  }
+  return value
+}
+
+function remainingTime(deadline) {
+  return Math.max(1, deadline - Date.now())
+}
 
 function createRequestId() {
   requestCounter = (requestCounter + 1) % Number.MAX_SAFE_INTEGER
@@ -21,7 +60,7 @@ function createRequestId() {
 function buildIuamCacheKey(data) {
   const domain = normalizeUrl(data?.domain, { keepSearch: true, emptyValue: '' })
   const proxy = buildProxyCacheKeyValue(data?.proxy)
-  return JSON.stringify({ mode: 'iuam', domain, proxy })
+  return JSON.stringify({ mode: 'iuam', domain, proxy, browserPlatform: data.browserPlatform })
 }
 
 function buildLogTarget(domain) {
@@ -183,10 +222,6 @@ app.use((req, res, next) => {
   next()
 })
 
-const turnstile = require('./endpoints/turnstile')
-const funcaptcha = require('./endpoints/funcaptcha')
-const cloudflare = require('./endpoints/cloudflare')
-
 app.post('/cloudflare', async (req, res) => {
   const data = req.body
   const requestId = req.requestId || createRequestId()
@@ -197,6 +232,8 @@ app.post('/cloudflare', async (req, res) => {
   let failurePhase = null
   let enteredClickMode = false
   let clearanceSource = null
+  let requestTimeout
+  let requestDeadline
 
   if (!data || typeof data.mode !== 'string') {
     const error = createError('Bad Request: missing or invalid mode', 400)
@@ -209,7 +246,7 @@ app.post('/cloudflare', async (req, res) => {
       error,
     })
   }
-  if (!SUPPORTED_MODES.has(data.mode)) {
+  if (!Object.hasOwn(SOLVERS, data.mode)) {
     const error = createError(`Bad Request: unsupported mode "${data.mode}"`, 400)
     return rejectRequest(res, {
       logger,
@@ -236,6 +273,9 @@ app.post('/cloudflare', async (req, res) => {
   try {
     validateDomain(data.domain, { allowPrivateNetworkTargets: config.allowPrivateNetworkTargets })
     data.proxy = normalizeProxy(data.proxy)
+    data.browserPlatform = parseBrowserPlatform(data.browserPlatform)
+    requestTimeout = parseRequestTimeout(data.timeoutMs)
+    requestDeadline = requestStartedAt + requestTimeout
   } catch (err) {
     return rejectRequest(res, {
       logger,
@@ -286,7 +326,6 @@ app.post('/cloudflare', async (req, res) => {
     })
   }
 
-  const requestTimeout = Number(data?.timeoutMs) || config.requestTimeoutMs
   let result
   let browser, page
   let browserProvider = null
@@ -296,8 +335,8 @@ app.post('/cloudflare', async (req, res) => {
     const browserStartedAt = Date.now()
     const ctx = await createBrowser({
       proxy: data.proxy,
-      timeoutMs: requestTimeout,
-      mode: data.mode,
+      platform: data.browserPlatform,
+      timeoutMs: remainingTime(requestDeadline),
     })
     browserStartupMs = Date.now() - browserStartedAt
     browser = ctx.browser
@@ -311,53 +350,29 @@ app.post('/cloudflare', async (req, res) => {
       proxy_enabled: Boolean(data.proxy),
     })
 
-    switch (data.mode) {
-      case 'turnstile':
-        stage = 'turnstile_execute'
-        result = await turnstile(
-          {
-            ...data,
-            timeoutMs: requestTimeout,
-            defaultTimeoutMs: config.requestTimeoutMs,
-            logger,
-            requestId,
-          },
-          page
-        )
-        break
+    stage = `${data.mode}_execute`
+    const solverTimeout = remainingTime(requestDeadline)
+    result = await withTimeout(
+      SOLVERS[data.mode](
+        {
+          ...data,
+          timeoutMs: solverTimeout,
+          logger,
+          requestId,
+        },
+        page
+      ),
+      solverTimeout,
+      'request',
+      {
+        phase: stage,
+        message: `Request timeout after ${requestTimeout}ms`,
+      }
+    )
 
-      case 'funcaptcha':
-        stage = 'funcaptcha_execute'
-        result = await funcaptcha(
-          {
-            ...data,
-            timeoutMs: requestTimeout,
-            defaultTimeoutMs: config.requestTimeoutMs,
-          },
-          page
-        )
-        break
-
-      case 'iuam':
-        stage = 'iuam_execute'
-        result = await cloudflare(
-          {
-            ...data,
-            timeoutMs: requestTimeout,
-            defaultTimeoutMs: config.requestTimeoutMs,
-            logger,
-            requestId,
-          },
-          page
-        )
-        if (useCache && (!result.code || result.code === 200)) {
-          const { publicResult } = splitInternalResult(result)
-          cacheStore.set(cacheKey, publicResult)
-        }
-        break
-
-      default:
-        throw createError('Invalid mode', 400)
+    if (data.mode === 'iuam' && useCache && (!result.code || result.code === 200)) {
+      const { publicResult } = splitInternalResult(result)
+      cacheStore.set(cacheKey, publicResult)
     }
   } catch (err) {
     const normalized = normalizeError(err)
@@ -418,8 +433,26 @@ app.post('/cloudflare', async (req, res) => {
 })
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() })
+  const status = shuttingDown ? 'shutting_down' : 'ok'
+  res.status(shuttingDown ? 503 : 200).json({
+    status,
+    uptime: process.uptime(),
+    concurrency: semaphore.getState(),
+  })
 })
+
+app.get('/ready', (req, res) => {
+  const cache = cacheStore.getState()
+  const ready = !shuttingDown && cache.loaded && !cache.lastError
+  res.status(ready ? 200 : 503).json({
+    status: ready ? 'ready' : 'not_ready',
+    cache,
+    concurrency: semaphore.getState(),
+  })
+})
+
+app.get('/openapi.json', (req, res) => res.json(openApiDocument))
+app.get('/docs', (req, res) => res.type('html').send(docsHtml))
 
 app.use((req, res) => {
   res.status(404).json({ message: 'Not Found' })
@@ -432,7 +465,7 @@ server.on('listening', () => {
   logger.info('event=server_listening', {
     port: typeof address === 'object' && address ? address.port : port,
     host: typeof address === 'object' && address ? address.address : undefined,
-    browser_provider: 'mixed',
+    browser_provider: 'cloakbrowser',
     pid: process.pid,
   })
 })

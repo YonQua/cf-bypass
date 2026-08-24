@@ -40,7 +40,6 @@ module.exports = {
     headless: parseBooleanEnv(readEnv('CLOAKBROWSER_HEADLESS'), false),
     humanize: parseBooleanEnv(readEnv('CLOAKBROWSER_HUMANIZE'), true),
     stealthArgs: parseBooleanEnv(readEnv('CLOAKBROWSER_STEALTH_ARGS'), true),
-    fingerprintSeed: readEnv('CLOAKBROWSER_FINGERPRINT_SEED'),
     timezone: readEnv('CLOAKBROWSER_TIMEZONE'),
     locale: readEnv('CLOAKBROWSER_LOCALE'),
   },

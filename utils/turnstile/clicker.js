@@ -67,8 +67,10 @@ async function clickTurnstileCandidates(page, candidates, diagnostics) {
 
 async function clickTurnstileOnce(page, diagnostics) {
   const candidates = await findTurnstileClickCandidates(page)
-  await clickTurnstileCandidates(page, candidates, diagnostics)
-  return candidates.length
+  const candidate = candidates[0]
+  if (!candidate) return false
+  await clickTurnstileCandidates(page, [candidate], diagnostics)
+  return true
 }
 
 async function clickIuamTurnstileOnce(page) {
@@ -77,60 +79,46 @@ async function clickIuamTurnstileOnce(page) {
     for (const element of responseElements) {
       let parentElement = null
       try {
-        parentElement = await element.evaluateHandle((el) => el.parentElement)
+        parentElement = await element.evaluateHandle((item) => item.parentElement)
         const box = await parentElement.boundingBox()
         if (!box) continue
         await page.mouse.click(box.x + CLICK_X_OFFSET, box.y + box.height / 2)
       } catch {
       } finally {
-        if (parentElement?.dispose) {
-          await parentElement.dispose().catch(() => {})
-        }
+        await parentElement?.dispose?.().catch(() => {})
       }
     }
     return true
   }
 
-  const coordinates = await page.evaluate(() => {
-    let candidates = []
+  const candidates = await page.evaluate(() => {
+    const exact = []
+    const fallback = []
 
-    document.querySelectorAll('div').forEach((item) => {
+    for (const element of document.querySelectorAll('div')) {
       try {
-        const rect = item.getBoundingClientRect()
-        const css = window.getComputedStyle(item)
-        if (
-          css.margin === '0px' &&
-          css.padding === '0px' &&
-          rect.width > 290 &&
-          rect.width <= 310 &&
-          !item.querySelector('*')
-        ) {
-          candidates.push({ x: rect.x, y: rect.y, w: rect.width, h: rect.height })
+        const rect = element.getBoundingClientRect()
+        if (rect.width <= 290 || rect.width > 310 || rect.height <= 0 || element.querySelector('*')) {
+          continue
         }
-      } catch {}
-    })
 
-    if (candidates.length <= 0) {
-      document.querySelectorAll('div').forEach((item) => {
-        try {
-          const rect = item.getBoundingClientRect()
-          if (rect.width > 290 && rect.width <= 310 && !item.querySelector('*')) {
-            candidates.push({ x: rect.x, y: rect.y, w: rect.width, h: rect.height })
-          }
-        } catch {}
-      })
+        const candidate = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+        const css = window.getComputedStyle(element)
+        if (css.margin === '0px' && css.padding === '0px') exact.push(candidate)
+        else fallback.push(candidate)
+      } catch {}
     }
 
-    return candidates
+    return exact.length > 0 ? exact : fallback
   })
 
-  for (const item of coordinates) {
-    try {
-      await page.mouse.click(item.x + CLICK_X_OFFSET, item.y + item.h / 2)
-    } catch {}
+  for (const candidate of candidates) {
+    await page.mouse
+      .click(candidate.x + CLICK_X_OFFSET, candidate.y + candidate.height / 2)
+      .catch(() => {})
   }
 
-  return coordinates.length > 0
+  return candidates.length > 0
 }
 
 module.exports = {

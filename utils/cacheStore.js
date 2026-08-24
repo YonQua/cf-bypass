@@ -15,6 +15,8 @@ function createCacheStore({
   let debounceTimer = null
   let intervalTimer = null
   let stopped = false
+  let loaded = false
+  let lastError = null
 
   function logWarn(message, error) {
     if (!logger?.warn) return
@@ -57,6 +59,7 @@ function createCacheStore({
         markDirty()
       }
     } catch (error) {
+      lastError = error.message
       logWarn('event=cache_load_failed', error)
     }
   }
@@ -65,13 +68,18 @@ function createCacheStore({
     if (flushing || !dirty) return
     flushing = true
     dirty = false
+    const temporaryPath = `${filePath}.${process.pid}.tmp`
 
     try {
       await fs.promises.mkdir(dirPath, { recursive: true })
       const payload = JSON.stringify(store, null, 2)
-      await fs.promises.writeFile(filePath, payload, 'utf-8')
+      await fs.promises.writeFile(temporaryPath, payload, 'utf-8')
+      await fs.promises.rename(temporaryPath, filePath)
+      lastError = null
     } catch (error) {
       dirty = true
+      lastError = error.message
+      await fs.promises.unlink(temporaryPath).catch(() => {})
       logWarn('event=cache_flush_failed', error)
     } finally {
       flushing = false
@@ -113,7 +121,11 @@ function createCacheStore({
 
   async function start() {
     stopped = false
-    await loadFromDisk()
+    try {
+      await loadFromDisk()
+    } finally {
+      loaded = true
+    }
     intervalTimer = setInterval(() => {
       const removed = purgeExpired(Date.now())
       if (removed > 0) {
@@ -146,6 +158,16 @@ function createCacheStore({
     set,
     start,
     stop,
+    getState() {
+      return {
+        loaded,
+        stopped,
+        dirty,
+        flushing,
+        entries: Object.keys(store).length,
+        lastError,
+      }
+    },
   }
 }
 

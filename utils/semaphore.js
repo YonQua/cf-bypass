@@ -13,6 +13,9 @@ function createSemaphore(max) {
         inUse -= 1
       }
     },
+    getState() {
+      return { limit: max, inUse, available: Math.max(0, max - inUse) }
+    },
   }
 }
 

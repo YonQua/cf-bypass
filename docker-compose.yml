@@ -25,11 +25,10 @@ services:
       - REQUEST_TIMEOUT_MS=90000
       # API认证令牌（留空表示不需要）
       - AUTH_TOKEN=
-      # CloakBrowser 固定指纹与地区参数，降低同一出口反复表现为新设备的概率
+      # CloakBrowser 指纹与地区参数
       - CLOAKBROWSER_HEADLESS=false
       - CLOAKBROWSER_HUMANIZE=true
       - CLOAKBROWSER_STEALTH_ARGS=true
-      - CLOAKBROWSER_FINGERPRINT_SEED=cf-bypass-poc-001
       - CLOAKBROWSER_TIMEZONE=America/New_York
       - CLOAKBROWSER_LOCALE=en-US
       - CLOAKBROWSER_AUTO_UPDATE=false

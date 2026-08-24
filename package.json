@@ -4,16 +4,13 @@
   "description": "Cloudflare IUAM and Turnstile bypass service for authorized testing",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "test": "node --test"
   },
   "dependencies": {
-    "chrome-launcher": "1.2.1",
-    "cloakbrowser": "0.3.21",
+    "cloakbrowser": "0.5.8",
     "express": "^5.1.0",
-    "ghost-cursor": "1.4.2",
-    "puppeteer-core": "^24.43.0",
-    "rebrowser-puppeteer-core": "23.10.3",
-    "xvfb": "0.4.0"
+    "puppeteer-core": "^24.43.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"

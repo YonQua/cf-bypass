@@ -8,10 +8,11 @@
 
 - 支持 `iuam`、`turnstile` 与 `funcaptcha` 三种模式
 - 支持对象形式的 HTTP / HTTPS 代理，并兼容部分 `socks5://` 传输场景
-- IUAM 请求支持缓存、严格链路优先，并通过仓库内 `iuam-rebrowser` provider 与共享 Turnstile clicker 处理需要点击的 managed challenge
+- IUAM 请求支持缓存，并通过 CloakBrowser 与共享 Turnstile clicker 处理需要点击的 managed challenge
 - `funcaptcha` 模式支持打开受控页面并读取 `arkose_labs_token`
 - `turnstile` 与 `funcaptcha` 使用 `cloakbrowser/puppeteer` 启动 CloakBrowser stealth Chromium binary
 - 提供结构化日志与 `GET /health` 健康检查
+- 提供 `GET /ready` 就绪检查、`GET /openapi.json` OpenAPI 3.1 文档与 `GET /docs` 在线说明页
 - 提供 Docker Compose 部署配置
 
 ## 快速开始
@@ -59,7 +60,6 @@ docker compose up --build -d
 | `CLOAKBROWSER_HEADLESS`         | `false`         | CloakBrowser 是否使用 headless 模式；Docker Compose 通过 Xvfb 默认使用 headful |
 | `CLOAKBROWSER_HUMANIZE`         | `true`          | CloakBrowser 是否启用人类化鼠标/键盘/滚动行为                |
 | `CLOAKBROWSER_STEALTH_ARGS`     | `true`          | CloakBrowser 是否使用默认 stealth 参数                       |
-| `CLOAKBROWSER_FINGERPRINT_SEED` | `null`          | 可选固定 fingerprint seed，用于同站点/同代理复访测试         |
 | `CLOAKBROWSER_TIMEZONE`         | `null`          | 可选 IANA 时区，例如 `America/New_York`                      |
 | `CLOAKBROWSER_LOCALE`           | `null`          | 可选 BCP 47 locale，例如 `en-US`                             |
 | `CLOAKBROWSER_AUTO_UPDATE`      | `false`         | Docker 镜像默认禁用 CloakBrowser 自动更新检查，避免版本漂移  |
@@ -69,18 +69,16 @@ docker compose up --build -d
 日志级别说明：
 
 - `info`（默认）：保留 `server_*`、`request_complete`、`handler_reject`、`handler_error` 这类摘要与异常日志
-- `debug`：额外输出 `request_start`、`browser_ready`、`cache_purge`、`iuam_click_mode_enabled` 等排障细节
+- `debug`：额外输出 `request_start`、`browser_ready`、`cache_purge` 等排障细节
 - logger 会自动省略 `null` / `undefined` 字段，避免成功日志被空值刷屏
 - 摘要日志中的 `target` 会保留协议、主机与路径，但默认省略 query / hash，兼顾定位与降噪
 
 浏览器运行时说明：
 
-- `iuam` 模式使用仓库内 `iuam-rebrowser` provider：`rebrowser-puppeteer-core` 连接 `chrome-launcher` 启动的 headful Chromium，并通过 `ghost-cursor` / Xvfb 环境保留真实桌面交互能力
-- IUAM managed challenge 点击由 provider 的早期后台循环与 `/cloudflare` IUAM 状态机兜底共同处理，两者复用 `utils/turnstile/clicker.js` 的候选发现逻辑
-- `turnstile` 与 `funcaptcha` 模式使用 CloakBrowser，不再内置系统 Chromium 回退路径
-- 当前 `cloakbrowser` 依赖精确锁定为 `0.3.21`，Linux x64 默认下载 Chromium `145.0.7632.159.9`，避免自动升级到 `Chrome/146`
+- 所有模式统一使用 `cloakbrowser/puppeteer`，不再维护 IUAM 专用 browser provider
+- IUAM 只接受 strict JSON challenge response 的 `Set-Cookie` 与 cookie jar 完全一致的 clearance；点击只推进挑战，不作为 clearance 来源
+- 当前 `cloakbrowser` 依赖精确锁定为 `0.5.8`，本次 Linux ARM64 构建实际下载 Chromium `146.0.7680.177.3`；镜像内 bundled baseline 为 `146.0.7680.177.5`
 - Docker Compose 使用 `xvfb-run -a npm start` 启动 headful CloakBrowser，以贴近真实桌面浏览器环境
-- Docker Compose 默认固定 `CLOAKBROWSER_FINGERPRINT_SEED=cf-bypass-poc-001`，避免同一出口连续请求时每次表现为全新设备
 - 如需后续切换到其他 CloakBrowser binary，可通过 `CLOAKBROWSER_BINARY_PATH=/app/.cloakbrowser/chromium-<version>/chrome` 显式指定；该路径必须在容器内真实存在
 - CloakBrowser binary 受其独立 Binary License 约束；内部授权测试可用，若作为第三方浏览器服务提供需先确认 OEM/SaaS 授权
 
@@ -102,8 +100,9 @@ docker compose up --build -d
 - `mode`：必填，`iuam`、`turnstile` 或 `funcaptcha`
 - `domain`：必填，必须是合法的 `http://` 或 `https://` URL，且不能包含用户名/密码
 - `siteKey`：`turnstile` 模式必填
-- `timeoutMs`：可选，本次请求超时，优先于全局 `REQUEST_TIMEOUT_MS`
+- `timeoutMs`：可选，整数 `1000–300000`；表示从服务收到请求开始计算的总预算，优先于全局 `REQUEST_TIMEOUT_MS`
 - `cache`：可选，仅对 `iuam` 生效；设为 `false` 时跳过缓存
+- `browserPlatform`：可选，浏览器指纹平台；仅允许 `windows`、`macos`、`linux`，默认 `windows`
 - `debugArtifacts`：可选，仅建议排障时设为 `true`；`turnstile` 失败时会输出页面诊断工件路径
 - `proxy`：可选，代理对象格式如下
 
@@ -142,7 +141,7 @@ Turnstile 超时排障说明：
 
 IUAM 缓存说明：
 
-- 缓存键基于轻量规范化后的 `domain` 与 `proxy`
+- 缓存键基于轻量规范化后的 `domain`、`proxy` 与 `browserPlatform`，不同指纹平台不会共享 clearance
 - 规范化仅用于缓存键：会统一协议/主机大小写、去默认端口、忽略 URL 片段，并把裸域与根路径 `/` 视为同义
 - 不会改动真实请求 URL
 
@@ -203,9 +202,16 @@ FunCaptcha 返回示例：
 ```json
 {
   "status": "ok",
-  "uptime": 123.45
+  "uptime": 123.45,
+  "concurrency": { "limit": 3, "inUse": 1, "available": 2 }
 }
 ```
+
+### 服务说明与就绪检查
+
+- `GET /ready`：检查服务是否未进入退出流程、缓存是否成功加载，并返回缓存与并发状态
+- `GET /openapi.json`：返回 OpenAPI 3.1 JSON，可直接导入 Postman、Insomnia 或代码生成工具
+- `GET /docs`：使用 ReDoc 展示交互式接口说明；页面脚本来自 ReDoc CDN，离线环境请直接使用 `/openapi.json`
 
 ## 调用示例
 
