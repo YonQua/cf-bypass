@@ -1,57 +1,32 @@
-const { createError } = require('../errors')
 const { sleep } = require('../async')
 const { clickTurnstileOnce } = require('./clicker')
 
-const TOKEN_SELECTORS = ['[name="cf-response"]', '[name="cf-turnstile-response"]']
-const SOLVER_INTERVAL_MS = 1000
+const POLL_INTERVAL_MS = 250
+const CLICK_RETRY_INTERVAL_MS = 5000
 
-async function readTurnstileToken(page) {
-  return page.evaluate((selectors) => {
-    if (typeof window.__turnstileToken === 'string' && window.__turnstileToken.trim().length >= 10) {
-      return window.__turnstileToken.trim()
-    }
-
-    for (const selector of selectors) {
-      const input = document.querySelector(selector)
-      const value = typeof input?.value === 'string' ? input.value.trim() : ''
-      if (value.length >= 10) return value
-    }
-
-    return null
-  }, TOKEN_SELECTORS)
-}
-
-async function waitForTurnstileToken(page, { timeoutMs, diagnostics }) {
+async function waitForTurnstile(page, { timeoutMs, readValue, diagnostics }) {
   const deadline = Date.now() + timeoutMs
-  let lastClickAt = 0
+  const interaction = { clickCount: 0, lastState: null, lastError: null }
+  let nextClickAt = 0
 
   while (Date.now() < deadline) {
-    const token = await readTurnstileToken(page).catch(() => null)
-    if (token) return token
+    const value = await readValue()
+    if (value) return { value, interaction }
 
     const now = Date.now()
-    if (now - lastClickAt >= SOLVER_INTERVAL_MS) {
-      lastClickAt = now
-      try {
-        await clickTurnstileOnce(page, diagnostics)
-      } catch (error) {
-        diagnostics?.recordSolverError?.(error)
-      }
+    if (now >= nextClickAt) {
+      const attempt = await clickTurnstileOnce(page, diagnostics)
+      interaction.lastState = attempt.state
+      interaction.lastError = attempt.error || null
+      if (attempt.clicked) interaction.clickCount += 1
+      nextClickAt = now + (attempt.clicked ? CLICK_RETRY_INTERVAL_MS : POLL_INTERVAL_MS)
     }
 
-    await sleep(250)
+    await sleep(Math.min(POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())))
   }
 
-  const finalToken = await readTurnstileToken(page).catch(() => null)
-  if (finalToken) return finalToken
-
-  throw createError(`Turnstile timeout after ${timeoutMs}ms`, 504, {
-    timeoutMs,
-    label: 'Turnstile',
-    phase: 'turnstile_wait_token',
-  })
+  const value = await readValue()
+  return value ? { value, interaction } : { value: null, interaction }
 }
 
-module.exports = {
-  waitForTurnstileToken,
-}
+module.exports = { waitForTurnstile }

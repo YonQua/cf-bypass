@@ -2,9 +2,23 @@ const { applyProxyAuthentication, applyRequestInterception } = require('../utils
 const { withTimeout } = require('../utils/async')
 const { createError, isTimeoutError } = require('../utils/errors')
 const { createTurnstileDiagnostics } = require('../utils/turnstile/diagnostics')
-const { waitForTurnstileToken } = require('../utils/turnstile/solver')
+const { waitForTurnstile } = require('../utils/turnstile/solver')
 
 const DIAGNOSTIC_GRACE_MS = 2000
+const TOKEN_SELECTORS = ['[name="cf-response"]', '[name="cf-turnstile-response"]']
+
+async function readTurnstileToken(page) {
+  return page.evaluate((selectors) => {
+    const callbackToken = window.__turnstileToken?.trim?.()
+    if (callbackToken?.length >= 10) return callbackToken
+
+    for (const selector of selectors) {
+      const value = document.querySelector(selector)?.value?.trim()
+      if (value?.length >= 10) return value
+    }
+    return null
+  }, TOKEN_SELECTORS)
+}
 
 function inlineScriptString(value) {
   return JSON.stringify(String(value)).replace(/<\/script/gi, '<\\/script')
@@ -132,28 +146,27 @@ async function turnstile(
       await throwWithDiagnostics(error, 'turnstile_page_load')
     }
 
-    let token
-    try {
-      token = await waitForTurnstileToken(page, {
-        timeoutMs: tokenTimeout,
-        diagnostics,
-      })
-    } catch (error) {
-      await throwWithDiagnostics(error, 'turnstile_wait_token', {
-        code: 504,
-        message: `Turnstile timeout after ${timeout}ms`,
-      })
+    const solveResult = await waitForTurnstile(page, {
+      timeoutMs: tokenTimeout,
+      diagnostics,
+      readValue: () => readTurnstileToken(page),
+    })
+
+    const token = solveResult.value
+    if (!token) {
+      await throwWithDiagnostics(
+        new Error(`Turnstile timeout after ${timeout}ms`),
+        'turnstile_wait_token',
+        { code: 504 }
+      )
     }
 
     const userAgent = await page.evaluate(() => navigator.userAgent).catch(() => null)
-    if (!token || token.length < 10) {
-      await throwWithDiagnostics(new Error('Failed to get token'), 'turnstile_token_invalid')
-    }
-
     return {
       token,
       user_agent: userAgent,
       elapsed_time: (Date.now() - startedAt) / 1000,
+      _meta: { interaction: solveResult.interaction },
     }
   })()
 

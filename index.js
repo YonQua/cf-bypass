@@ -86,8 +86,7 @@ function buildRequestMeta({
   browserStartupMs,
   browserProvider,
   cacheHit,
-  enteredClickMode,
-  clearanceSource,
+  interaction,
   proxyEnabled,
 }) {
   return {
@@ -100,8 +99,11 @@ function buildRequestMeta({
     ...(typeof cacheHit === 'boolean' ? { cache_hit: cacheHit } : {}),
     ...(browserStartupMs != null ? { browser_startup_ms: browserStartupMs } : {}),
     ...(browserProvider ? { browser_provider: browserProvider } : {}),
-    ...(enteredClickMode ? { entered_click_mode: true } : {}),
-    ...(clearanceSource ? { clearance_source: clearanceSource } : {}),
+    ...(interaction?.clickCount > 0
+      ? { entered_click_mode: true, click_attempt_count: interaction.clickCount }
+      : {}),
+    ...(interaction?.lastState ? { turnstile_state: interaction.lastState } : {}),
+    ...(interaction?.lastError ? { turnstile_error: interaction.lastError } : {}),
     ...(typeof proxyEnabled === 'boolean' ? { proxy_enabled: proxyEnabled } : {}),
   }
 }
@@ -141,7 +143,7 @@ function logHandlerFailure(options) {
     failurePhase,
     browserStartupMs,
     browserProvider,
-    enteredClickMode,
+    interaction,
     proxyEnabled,
     normalized,
     error,
@@ -154,7 +156,7 @@ function logHandlerFailure(options) {
     failurePhase,
     browserStartupMs,
     browserProvider,
-    enteredClickMode,
+    interaction,
     proxyEnabled,
   })
 
@@ -230,8 +232,7 @@ app.post('/cloudflare', async (req, res) => {
   let stage = 'request_validation'
   let browserStartupMs = null
   let failurePhase = null
-  let enteredClickMode = false
-  let clearanceSource = null
+  let interaction = null
   let requestTimeout
   let requestDeadline
 
@@ -370,14 +371,14 @@ app.post('/cloudflare', async (req, res) => {
       }
     )
 
-    if (data.mode === 'iuam' && useCache && (!result.code || result.code === 200)) {
+    if (data.mode === 'iuam' && useCache) {
       const { publicResult } = splitInternalResult(result)
       cacheStore.set(cacheKey, publicResult)
     }
   } catch (err) {
     const normalized = normalizeError(err)
     failurePhase = normalized.detail?.phase || stage
-    enteredClickMode = normalized.detail?.enteredClickMode || false
+    interaction = normalized.detail?.interaction || null
     logHandlerFailure({
       logger,
       requestId,
@@ -387,7 +388,7 @@ app.post('/cloudflare', async (req, res) => {
       failurePhase,
       browserStartupMs,
       browserProvider,
-      enteredClickMode,
+      interaction,
       proxyEnabled: Boolean(data.proxy),
       normalized,
       error: err,
@@ -408,8 +409,7 @@ app.post('/cloudflare', async (req, res) => {
 
   const { publicResult, internalMeta } = splitInternalResult(result)
   if (internalMeta) {
-    enteredClickMode = internalMeta.enteredClickMode || false
-    clearanceSource = internalMeta.clearanceSource || null
+    interaction = internalMeta.interaction || null
   }
   logger.info(
     'event=request_complete',
@@ -423,8 +423,7 @@ app.post('/cloudflare', async (req, res) => {
       browserStartupMs,
       browserProvider,
       failurePhase: publicResult.code ? failurePhase || stage : null,
-      enteredClickMode,
-      clearanceSource,
+      interaction,
       proxyEnabled: Boolean(data.proxy),
     })
   )

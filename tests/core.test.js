@@ -4,10 +4,15 @@ const os = require('node:os')
 const path = require('node:path')
 const test = require('node:test')
 
+const solveIuam = require('../endpoints/cloudflare')
+const { openApiDocument } = require('../openapi')
 const { createCacheStore } = require('../utils/cacheStore')
 const { createSemaphore } = require('../utils/semaphore')
-const { openApiDocument } = require('../openapi')
-const solveIuam = require('../endpoints/cloudflare')
+const {
+  clickTurnstileOnce,
+  probeTurnstileCheckbox,
+} = require('../utils/turnstile/clicker')
+const { waitForTurnstile } = require('../utils/turnstile/solver')
 
 test('semaphore reports capacity and releases idempotently', () => {
   const semaphore = createSemaphore(2)
@@ -66,88 +71,186 @@ test('OpenAPI document describes all public endpoints and timeout contract', () 
   assert.equal(platform.default, 'windows')
 })
 
-function createIuamPage({ strictClearance, cookieValues }) {
-  let responseHandler = null
-  let cookieIndex = 0
-  let evaluateCount = 0
-
+function createIuamPage(cookieValue) {
   return {
-    on(event, handler) {
-      if (event === 'response') responseHandler = handler
-    },
-    off(event, handler) {
-      if (event === 'response' && responseHandler === handler) responseHandler = null
-    },
-    async goto() {
-      if (!strictClearance) return
-      responseHandler?.({
-        url: () => 'https://example.com/cdn-cgi/challenge-platform/flow/ov1',
-        request: () => ({
-          method: () => 'POST',
-          headers: () => ({ 'content-type': 'application/json' }),
-        }),
-        headers: () => ({ 'set-cookie': `cf_clearance=${strictClearance}; Path=/` }),
-      })
-    },
-    async evaluate() {
-      evaluateCount += 1
-      return evaluateCount === 1 ? 'test-user-agent' : []
-    },
-    async cookies() {
-      const value = cookieValues[Math.min(cookieIndex, cookieValues.length - 1)]
-      cookieIndex += 1
-      return value ? [{ name: 'cf_clearance', value }] : []
-    },
-    mouse: {
-      move: async () => {},
-      click: async () => {},
-    },
+    browser: () => ({ targets: () => [] }),
+    goto: async () => {},
+    evaluate: async () => 'test-user-agent',
+    cookies: async () =>
+      cookieValue ? [{ name: 'cf_clearance', value: cookieValue }] : [],
   }
 }
 
-test('IUAM ignores a random cookie until it matches strict response clearance', async () => {
-  const page = createIuamPage({
-    strictClearance: 'final-clearance',
-    cookieValues: ['random-transition-value', 'final-clearance'],
-  })
+test('IUAM succeeds from the current browser clearance cookie', async () => {
+  const result = await solveIuam(
+    { domain: 'https://example.com', timeoutMs: 1000 },
+    createIuamPage('current-clearance')
+  )
 
-  const result = await solveIuam({ domain: 'https://example.com', timeoutMs: 1000 }, page)
-
-  assert.equal(result.cf_clearance, 'final-clearance')
-  assert.notEqual(result.cf_clearance, 'random-transition-value')
+  assert.equal(result.cf_clearance, 'current-clearance')
   assert.equal(result.user_agent, 'test-user-agent')
-  assert.equal(result._meta.clearanceSource, 'strict_cookie_match')
+  assert.deepEqual(result._meta.interaction, {
+    clickCount: 0,
+    lastState: null,
+    lastError: null,
+  })
 })
 
-test('IUAM ignores a non-JSON challenge cookie and times out without strict confirmation', async () => {
-  let responseHandler = null
+test('IUAM timeout preserves the final interaction state', async () => {
+  await assert.rejects(
+    solveIuam({ domain: 'https://example.com', timeoutMs: 30 }, createIuamPage(null)),
+    (error) =>
+      error.code === 504 &&
+      error.detail?.phase === 'iuam_wait_clearance' &&
+      error.detail?.interaction?.lastState === 'target_missing'
+  )
+})
+
+function createTurnstilePage({ resultCount = 1, candidate = null, clickError = null } = {}) {
+  const calls = []
+  let clicks = 0
+  const session = {
+    async send(method, params) {
+      calls.push({ method, params })
+      if (method === 'DOM.performSearch') return { searchId: 'search-1', resultCount }
+      return {}
+    },
+    detach: async () => {},
+  }
+  const target = {
+    url: () =>
+      'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/example',
+    createCDPSession: async () => session,
+  }
   const page = {
-    on(event, handler) {
-      if (event === 'response') responseHandler = handler
-    },
-    off() {},
-    async goto() {
-      responseHandler?.({
-        url: () => 'https://example.com/cdn-cgi/challenge-platform/flow/ov1',
-        request: () => ({
-          method: () => 'POST',
-          headers: () => ({ 'content-type': 'text/plain' }),
-        }),
-        headers: () => ({
-          'set-cookie': 'cf_clearance=random-transition-value; Path=/',
-        }),
-      })
-    },
-    evaluate: async () => [],
-    cookies: async () => [{ name: 'cf_clearance', value: 'random-transition-value' }],
+    browser: () => ({ targets: () => [target] }),
+    evaluate: async () => candidate,
     mouse: {
       move: async () => {},
-      click: async () => {},
+      click: async () => {
+        if (clickError) throw clickError
+        clicks += 1
+      },
     },
   }
 
+  return { page, target, session, calls, getClicks: () => clicks }
+}
+
+test('Turnstile probe searches the challenge OOPIF shadow DOM', async () => {
+  const { page, calls } = createTurnstilePage()
+
+  assert.deepEqual(await probeTurnstileCheckbox(page), { state: 'checkbox_ready' })
+  assert.deepEqual(
+    calls.map(({ method }) => method),
+    ['DOM.enable', 'DOM.performSearch', 'DOM.discardSearchResults']
+  )
+  assert.equal(calls[1].params.query, 'input[type=checkbox]')
+  assert.equal(calls[1].params.includeUserAgentShadowDOM, true)
+})
+
+test('Turnstile automatic verification does not click', async () => {
+  const { page, getClicks } = createTurnstilePage({ resultCount: 0 })
+
+  assert.deepEqual(await clickTurnstileOnce(page), {
+    state: 'automatic_verification',
+    clicked: false,
+  })
+  assert.equal(getClicks(), 0)
+})
+
+test('Turnstile clicks one visible candidate when the checkbox is ready', async () => {
+  const candidate = { source: 'iframe', x: 10, y: 20, width: 300, height: 65 }
+  const { page, getClicks } = createTurnstilePage({ candidate })
+
+  assert.deepEqual(await clickTurnstileOnce(page), { state: 'clicked', clicked: true })
+  assert.equal(getClicks(), 1)
+})
+
+test('Turnstile does not click without a visible candidate', async () => {
+  const { page, getClicks } = createTurnstilePage({ candidate: null })
+
+  assert.deepEqual(await clickTurnstileOnce(page), {
+    state: 'candidate_missing',
+    clicked: false,
+  })
+  assert.equal(getClicks(), 0)
+})
+
+test('Turnstile does not count a failed mouse click', async () => {
+  const candidate = { source: 'iframe', x: 10, y: 20, width: 300, height: 65 }
+  const { page, getClicks } = createTurnstilePage({
+    candidate,
+    clickError: new Error('mouse unavailable'),
+  })
+
+  assert.deepEqual(await clickTurnstileOnce(page), {
+    state: 'click_error',
+    error: 'mouse unavailable',
+    clicked: false,
+  })
+  assert.equal(getClicks(), 0)
+})
+
+test('Turnstile probe replaces the CDP session when its target changes', async () => {
+  let activeTarget
+  let detached = 0
+  const oldSession = {
+    async send(method) {
+      if (method === 'DOM.performSearch') return { searchId: 'old', resultCount: 0 }
+      return {}
+    },
+    async detach() {
+      detached += 1
+    },
+  }
+  const newSession = {
+    async send(method) {
+      if (method === 'DOM.performSearch') return { searchId: 'new', resultCount: 1 }
+      return {}
+    },
+  }
+  const oldTarget = {
+    url: () =>
+      'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/old',
+    createCDPSession: async () => oldSession,
+  }
+  const newTarget = {
+    url: () =>
+      'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/new',
+    createCDPSession: async () => newSession,
+  }
+  activeTarget = oldTarget
+  const page = { browser: () => ({ targets: () => [activeTarget] }) }
+
+  assert.deepEqual(await probeTurnstileCheckbox(page), { state: 'automatic_verification' })
+  activeTarget = newTarget
+  assert.deepEqual(await probeTurnstileCheckbox(page), { state: 'checkbox_ready' })
+  assert.equal(detached, 1)
+})
+
+test('shared Turnstile wait returns immediately when a value is ready', async () => {
+  const result = await waitForTurnstile({}, {
+    timeoutMs: 1000,
+    readValue: async () => 'ready-value',
+  })
+
+  assert.equal(result.value, 'ready-value')
+  assert.deepEqual(result.interaction, {
+    clickCount: 0,
+    lastState: null,
+    lastError: null,
+  })
+})
+
+test('shared Turnstile wait does not hide value read failures', async () => {
   await assert.rejects(
-    solveIuam({ domain: 'https://example.com', timeoutMs: 50 }, page),
-    (error) => error.code === 504 && error.detail?.phase === 'iuam_wait_clearance'
+    waitForTurnstile({}, {
+      timeoutMs: 1000,
+      readValue: async () => {
+        throw new Error('browser disconnected')
+      },
+    }),
+    /browser disconnected/
   )
 })
