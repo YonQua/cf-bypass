@@ -105,7 +105,58 @@ async function clickTurnstileOnce(page, diagnostics) {
   }
 }
 
+async function clickIuamTurnstileOnce(page) {
+  // IUAM 页面可直接暴露隐藏响应元素；linux.do 依赖其父容器坐标，
+  // 不能用普通 Turnstile 的 iframe/容器候选搜索替代这条路径。
+  const responseElements = await page.$$('[name="cf-turnstile-response"]')
+  if (responseElements.length > 0) {
+    for (const element of responseElements) {
+      let parentElement = null
+      try {
+        parentElement = await element.evaluateHandle((item) => item.parentElement)
+        const box = await parentElement.boundingBox()
+        if (!box) continue
+        await page.mouse.click(box.x + CLICK_X_OFFSET, box.y + box.height / 2)
+      } catch {
+      } finally {
+        if (parentElement?.dispose) await parentElement.dispose().catch(() => {})
+      }
+    }
+    return true
+  }
+
+  const candidates = await page.evaluate(() => {
+    const exact = []
+    const fallback = []
+
+    for (const element of document.querySelectorAll('div')) {
+      try {
+        const rect = element.getBoundingClientRect()
+        if (rect.width <= 290 || rect.width > 310 || rect.height <= 0 || element.querySelector('*')) {
+          continue
+        }
+
+        const candidate = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+        const css = window.getComputedStyle(element)
+        if (css.margin === '0px' && css.padding === '0px') exact.push(candidate)
+        else fallback.push(candidate)
+      } catch {}
+    }
+
+    return exact.length > 0 ? exact : fallback
+  })
+
+  for (const candidate of candidates) {
+    await page.mouse
+      .click(candidate.x + CLICK_X_OFFSET, candidate.y + candidate.height / 2)
+      .catch(() => {})
+  }
+
+  return candidates.length > 0
+}
+
 module.exports = {
+  clickIuamTurnstileOnce,
   clickTurnstileOnce,
   findTurnstileClickCandidate,
   probeTurnstileCheckbox,
