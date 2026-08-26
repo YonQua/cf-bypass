@@ -15,7 +15,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - `timeoutMs` 现在是请求级总预算，并统一限制为 `1000–300000ms`
-- 请求可通过白名单字段 `browserPlatform` 选择 `windows`、`macos` 或 `linux` 指纹，默认保持 `windows`
+- 请求可通过白名单字段 `browserPlatform` 选择 `windows`、`macos` 或 `linux` 指纹，默认改为 `macos`，用于贴近本地可用浏览器指纹
 - IUAM 点击由 endpoint 的单一等待循环调度，不再由 browser provider 抢跑
 - IUAM 缓存改用临时文件加原子重命名落盘，并公开可观测状态
 - `proxy` 请求参数现在统一为 `{"url", "username", "password"}` 形态，不再接受旧的 `hostname` / `port` 拆分格式

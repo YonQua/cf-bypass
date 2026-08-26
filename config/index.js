@@ -26,6 +26,7 @@ function parseNumberEnv(name, defaultValue) {
 module.exports = {
   port: parseNumberEnv('PORT', 8080),
   authToken: readEnv('AUTH_TOKEN'),
+  browserPlatform: readEnv('BROWSER_PLATFORM') || 'macos',
   browserLimit: parseNumberEnv('BROWSER_LIMIT', 20),
   requestTimeoutMs: parseNumberEnv('REQUEST_TIMEOUT_MS', 60000),
   browserCloseTimeoutMs: Math.max(

@@ -51,6 +51,7 @@ docker compose up --build -d
 | `HOST_PORT`                     | `8080`          | Docker Compose 宿主机映射端口，不影响容器内 `PORT`           |
 | `AUTH_TOKEN`                    | `null`          | 可选的接口认证 Token                                         |
 | `BROWSER_LIMIT`                 | `20`            | 最大浏览器并发数；Docker Compose 默认设为 `3`                |
+| `BROWSER_PLATFORM`              | `macos`         | 默认浏览器指纹平台；可用 `linux`、`macos`、`windows` 做 A/B 测试 |
 | `REQUEST_TIMEOUT_MS`            | `60000`         | 全局请求超时（毫秒）；Docker Compose 默认设为 `90000`         |
 | `BROWSER_CLOSE_TIMEOUT_MS`      | `5000`          | 单次请求结束后等待浏览器关闭的最长时间                       |
 | `SHUTDOWN_TIMEOUT_MS`           | `60000`         | 服务优雅退出总超时，独立于请求超时                           |
@@ -75,9 +76,9 @@ docker compose up --build -d
 
 浏览器运行时说明：
 
-- 所有模式统一使用 `cloakbrowser/puppeteer`，不再维护 IUAM 专用 browser provider
+- 所有模式统一使用 `cloakbrowser/puppeteer`
 - IUAM 只接受 strict JSON challenge response 的 `Set-Cookie` 与 cookie jar 完全一致的 clearance；点击只推进挑战，不作为 clearance 来源
-- 当前 `cloakbrowser` 依赖精确锁定为 `0.5.8`，本次 Linux ARM64 构建实际下载 Chromium `146.0.7680.177.3`；镜像内 bundled baseline 为 `146.0.7680.177.5`
+- 当前 `cloakbrowser` 依赖锁定为 `0.5.9`；Linux ARM64 镜像会在构建时下载平台对应的 Chromium binary，具体版本以 `npx cloakbrowser info` 为准
 - Docker Compose 使用 `xvfb-run -a npm start` 启动 headful CloakBrowser，以贴近真实桌面浏览器环境
 - 如需后续切换到其他 CloakBrowser binary，可通过 `CLOAKBROWSER_BINARY_PATH=/app/.cloakbrowser/chromium-<version>/chrome` 显式指定；该路径必须在容器内真实存在
 - CloakBrowser binary 受其独立 Binary License 约束；内部授权测试可用，若作为第三方浏览器服务提供需先确认 OEM/SaaS 授权
@@ -102,7 +103,7 @@ docker compose up --build -d
 - `siteKey`：`turnstile` 模式必填
 - `timeoutMs`：可选，整数 `1000–300000`；表示从服务收到请求开始计算的总预算，优先于全局 `REQUEST_TIMEOUT_MS`
 - `cache`：可选，仅对 `iuam` 生效；设为 `false` 时跳过缓存
-- `browserPlatform`：可选，浏览器指纹平台；仅允许 `windows`、`macos`、`linux`，默认 `windows`
+- `browserPlatform`：可选，浏览器指纹平台；仅允许 `windows`、`macos`、`linux`，默认 `macos`
 - `debugArtifacts`：可选，仅建议排障时设为 `true`；`turnstile` 失败时会输出页面诊断工件路径
 - `proxy`：可选，代理对象格式如下
 

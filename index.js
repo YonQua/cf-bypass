@@ -38,14 +38,14 @@ function parseRequestTimeout(value) {
 }
 
 function parseBrowserPlatform(value) {
-  if (value == null || value === '') return 'windows'
-  if (typeof value !== 'string' || !BROWSER_PLATFORMS.has(value)) {
+  const platform = value == null || value === '' ? config.browserPlatform : value
+  if (typeof platform !== 'string' || !BROWSER_PLATFORMS.has(platform)) {
     throw createError(
       'Bad Request: browserPlatform must be one of windows, macos, linux',
       400
     )
   }
-  return value
+  return platform
 }
 
 function remainingTime(deadline) {

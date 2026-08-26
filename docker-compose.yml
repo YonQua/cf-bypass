@@ -21,6 +21,8 @@ services:
       - PORT=8080
       # 最大并发浏览器数量
       - BROWSER_LIMIT=3
+      # 默认浏览器指纹平台，可用 macos/linux/windows 做 A/B 测试
+      - BROWSER_PLATFORM=${BROWSER_PLATFORM:-linux}
       # 超时时间（毫秒）
       - REQUEST_TIMEOUT_MS=90000
       # API认证令牌（留空表示不需要）
@@ -29,8 +31,8 @@ services:
       - CLOAKBROWSER_HEADLESS=false
       - CLOAKBROWSER_HUMANIZE=true
       - CLOAKBROWSER_STEALTH_ARGS=true
-      - CLOAKBROWSER_TIMEZONE=America/New_York
-      - CLOAKBROWSER_LOCALE=en-US
+      - CLOAKBROWSER_TIMEZONE=${CLOAKBROWSER_TIMEZONE:-America/New_York}
+      - CLOAKBROWSER_LOCALE=${CLOAKBROWSER_LOCALE:-en-US}
       - CLOAKBROWSER_AUTO_UPDATE=false
       - CLOAKBROWSER_CACHE_DIR=/app/.cloakbrowser
     # 共享内存大小：Chrome需要较大共享内存

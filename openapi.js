@@ -155,7 +155,7 @@ const openApiDocument = {
           browserPlatform: {
             type: 'string',
             enum: ['windows', 'macos', 'linux'],
-            default: 'windows',
+            default: 'macos',
             description: '浏览器指纹平台。服务端仅转换为受控的 fingerprint-platform 参数。',
           },
           debugArtifacts: { type: 'boolean', default: false },

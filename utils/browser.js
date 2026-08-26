@@ -51,7 +51,7 @@ function buildCloakbrowserProxy(proxy) {
   return result
 }
 
-async function createBrowser({ proxy, platform = 'windows', timeoutMs }) {
+async function createBrowser({ proxy, platform = config.browserPlatform, timeoutMs }) {
   const deadline = Date.now() + (Number(timeoutMs) || 60000)
   const remainingTime = () => Math.max(1, deadline - Date.now())
   const { launch } = await withTimeout(

@@ -31,8 +31,8 @@ function extractClearanceFromSetCookieHeader(setCookieHeader) {
 }
 
 function extractClearanceCandidate(response) {
-  // linux.do 的最终值必须同时满足 challenge POST、JSON 请求和 Set-Cookie；
-  // 普通 cookie 或非 JSON 响应只能作为待验证候选，不能升级为严格结果。
+  // 严格候选必须来自 challenge POST 的 JSON 响应和 Set-Cookie；
+  // 普通 cookie 或非 JSON 响应只能作为待验证候选，不能直接返回。
   if (!isChallengePlatformUrl(response.url())) return null
 
   const request = response.request()

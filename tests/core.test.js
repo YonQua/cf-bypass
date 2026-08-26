@@ -69,7 +69,7 @@ test('OpenAPI document describes all public endpoints and timeout contract', () 
 
   const platform = openApiDocument.components.schemas.SolveRequest.properties.browserPlatform
   assert.deepEqual(platform.enum, ['windows', 'macos', 'linux'])
-  assert.equal(platform.default, 'windows')
+  assert.equal(platform.default, 'macos')
 })
 
 function createIuamPage({
