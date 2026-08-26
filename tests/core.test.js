@@ -366,6 +366,32 @@ test('IUAM clicks the response parent without falling back to generic candidates
   assert.equal(disposed, 1)
 })
 
+test('IUAM clicks a visible Turnstile iframe when no response element is exposed', async () => {
+  let clicks = 0
+  const target = {
+    url: () =>
+      'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/example',
+    createCDPSession: async () => ({
+      send: async (method) =>
+        method === 'DOM.performSearch' ? { searchId: 'search-1', resultCount: 1 } : {},
+    }),
+  }
+  const page = {
+    $$: async () => [],
+    browser: () => ({ targets: () => [target] }),
+    evaluate: async () => ({ source: 'iframe', x: 10, y: 20, width: 300, height: 65 }),
+    mouse: {
+      move: async () => {},
+      click: async () => {
+        clicks += 1
+      },
+    },
+  }
+
+  assert.equal(await clickIuamTurnstileOnce(page), true)
+  assert.equal(clicks, 1)
+})
+
 test('Turnstile probe replaces the CDP session when its target changes', async () => {
   let activeTarget
   let detached = 0

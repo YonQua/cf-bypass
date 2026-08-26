@@ -125,34 +125,11 @@ async function clickIuamTurnstileOnce(page) {
     return true
   }
 
-  const candidates = await page.evaluate(() => {
-    const exact = []
-    const fallback = []
-
-    for (const element of document.querySelectorAll('div')) {
-      try {
-        const rect = element.getBoundingClientRect()
-        if (rect.width <= 290 || rect.width > 310 || rect.height <= 0 || element.querySelector('*')) {
-          continue
-        }
-
-        const candidate = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
-        const css = window.getComputedStyle(element)
-        if (css.margin === '0px' && css.padding === '0px') exact.push(candidate)
-        else fallback.push(candidate)
-      } catch {}
-    }
-
-    return exact.length > 0 ? exact : fallback
-  })
-
-  for (const candidate of candidates) {
-    await page.mouse
-      .click(candidate.x + CLICK_X_OFFSET, candidate.y + candidate.height / 2)
-      .catch(() => {})
-  }
-
-  return candidates.length > 0
+  // Managed challenges expose the checkbox in a cross-origin iframe rather than
+  // as a top-level response element. Reuse the guarded generic path so we only
+  // click when the challenge target reports a real checkbox.
+  const result = await clickTurnstileOnce(page)
+  return result.clicked === true
 }
 
 module.exports = {
