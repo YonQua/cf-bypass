@@ -51,7 +51,7 @@ docker compose up --build -d
 | `HOST_PORT`                     | `8080`          | Docker Compose 宿主机映射端口，不影响容器内 `PORT`           |
 | `AUTH_TOKEN`                    | `null`          | 可选的接口认证 Token                                         |
 | `BROWSER_LIMIT`                 | `20`            | 最大浏览器并发数；Docker Compose 默认设为 `3`                |
-| `BROWSER_PLATFORM`              | `macos`         | 默认浏览器指纹平台；可用 `linux`、`macos`、`windows` 做 A/B 测试 |
+| `BROWSER_PLATFORM`              | `macos`         | 默认浏览器指纹平台；可用 `linux`、`macos`、`windows` 做 A/B 测试；当前 Linux 容器不建议使用 `windows` |
 | `REQUEST_TIMEOUT_MS`            | `60000`         | 全局请求超时（毫秒）；Docker Compose 默认设为 `90000`         |
 | `BROWSER_CLOSE_TIMEOUT_MS`      | `5000`          | 单次请求结束后等待浏览器关闭的最长时间                       |
 | `SHUTDOWN_TIMEOUT_MS`           | `60000`         | 服务优雅退出总超时，独立于请求超时                           |
@@ -77,11 +77,20 @@ docker compose up --build -d
 浏览器运行时说明：
 
 - 所有模式统一使用 `cloakbrowser/puppeteer`
-- IUAM 只接受 strict JSON challenge response 的 `Set-Cookie` 与 cookie jar 完全一致的 clearance；点击只推进挑战，不作为 clearance 来源
-- 当前 `cloakbrowser` 依赖锁定为 `0.5.9`；Linux ARM64 镜像会在构建时下载平台对应的 Chromium binary，具体版本以 `npx cloakbrowser info` 为准
+- IUAM 优先接受 strict JSON challenge response 的 `Set-Cookie` 与 cookie jar 完全一致的 clearance；在页面已明确通过且 cookie jar 一致时，也可接受 non-JSON 过渡 cookie；点击只推进挑战，不作为 clearance 来源
+- 当前 `cloakbrowser` 依赖锁定为 `0.3.21`；Linux ARM64 镜像构建时使用 Chromium `145.0.7632.159.7`，macOS ARM64 本地 binary 为 `145.0.7632.109.2`
 - Docker Compose 使用 `xvfb-run -a npm start` 启动 headful CloakBrowser，以贴近真实桌面浏览器环境
 - 如需后续切换到其他 CloakBrowser binary，可通过 `CLOAKBROWSER_BINARY_PATH=/app/.cloakbrowser/chromium-<version>/chrome` 显式指定；该路径必须在容器内真实存在
 - CloakBrowser binary 受其独立 Binary License 约束；内部授权测试可用，若作为第三方浏览器服务提供需先确认 OEM/SaaS 授权
+
+Docker/CloakBrowser 排障要点：
+
+- `browserPlatform` 是请求级覆盖项，会优先于 `BROWSER_PLATFORM`；测试脚本若显式传入平台，会覆盖 Compose 默认值。
+- Docker 的 binary 运行平台仍是 `linux-arm64`，即使 `browserPlatform` 设置为 `macos`；两者分别表示运行环境和浏览器指纹平台。
+- 当前依赖版本用于锁定 Linux ARM64 Chromium `145.0.7632.159.7`；升级 `cloakbrowser` 可能改变各平台 binary 版本，重建镜像后应执行 `npx cloakbrowser info` 核对。
+- Linux 容器没有完整 Windows 字体集，`windows` 指纹可能导致 clearance 获取失败或后续 403，不建议作为默认平台。
+- `CLOAKBROWSER_TIMEZONE` / `CLOAKBROWSER_LOCALE` 应与代理出口所在地匹配；不确定时保持为空，不要固定套用纽约时区。
+- 若本机 `uv run cf_test.py` 因 `/Users/leishao/.cache/uv` 权限失败，可使用 `python3 cf_test.py`，或为 uv 指定可写缓存目录。
 
 ## API
 
@@ -103,7 +112,7 @@ docker compose up --build -d
 - `siteKey`：`turnstile` 模式必填
 - `timeoutMs`：可选，整数 `1000–300000`；表示从服务收到请求开始计算的总预算，优先于全局 `REQUEST_TIMEOUT_MS`
 - `cache`：可选，仅对 `iuam` 生效；设为 `false` 时跳过缓存
-- `browserPlatform`：可选，浏览器指纹平台；仅允许 `windows`、`macos`、`linux`，默认 `macos`
+- `browserPlatform`：可选，浏览器指纹平台；仅允许 `windows`、`macos`、`linux`，默认 `macos`。当前 Linux 容器缺少完整 Windows 字体集，不建议使用 `windows`；`linux` 可用于容器原生指纹测试
 - `debugArtifacts`：可选，仅建议排障时设为 `true`；`turnstile` 失败时会输出页面诊断工件路径
 - `proxy`：可选，代理对象格式如下
 
@@ -143,6 +152,7 @@ Turnstile 超时排障说明：
 IUAM 缓存说明：
 
 - 缓存键基于轻量规范化后的 `domain`、`proxy` 与 `browserPlatform`，不同指纹平台不会共享 clearance
+- 只有来自 strict JSON challenge response 且与 cookie jar 一致的 clearance 才会写入缓存；仅通过页面状态验证的非 JSON 过渡 cookie 每次请求重新获取
 - 规范化仅用于缓存键：会统一协议/主机大小写、去默认端口、忽略 URL 片段，并把裸域与根路径 `/` 视为同义
 - 不会改动真实请求 URL
 

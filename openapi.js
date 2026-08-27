@@ -156,7 +156,7 @@ const openApiDocument = {
             type: 'string',
             enum: ['windows', 'macos', 'linux'],
             default: 'macos',
-            description: '浏览器指纹平台。服务端仅转换为受控的 fingerprint-platform 参数。',
+            description: '浏览器指纹平台。服务端仅转换为受控的 fingerprint-platform 参数。当前 Linux 容器缺少完整 Windows 字体集，不建议使用 windows；macos 可用于与本机运行结果对齐。',
           },
           debugArtifacts: { type: 'boolean', default: false },
           proxy: { $ref: '#/components/schemas/Proxy' },

@@ -43,7 +43,7 @@ function extractClearanceCandidate(response) {
 
   return {
     value,
-    strict: isJsonContentType(request.headers?.() || {}),
+    strict: isJsonContentType(response.headers?.() || {}),
   }
 }
 

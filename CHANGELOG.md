@@ -15,14 +15,14 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - `timeoutMs` 现在是请求级总预算，并统一限制为 `1000–300000ms`
-- 请求可通过白名单字段 `browserPlatform` 选择 `windows`、`macos` 或 `linux` 指纹，默认改为 `macos`，用于贴近本地可用浏览器指纹
+- 请求可通过白名单字段 `browserPlatform` 选择 `windows`、`macos` 或 `linux` 指纹，默认使用 `macos`；`linux` 可用于容器原生指纹测试
 - IUAM 点击由 endpoint 的单一等待循环调度，不再由 browser provider 抢跑
 - IUAM 缓存改用临时文件加原子重命名落盘，并公开可观测状态
 - `proxy` 请求参数现在统一为 `{"url", "username", "password"}` 形态，不再接受旧的 `hostname` / `port` 拆分格式
-- `cloakbrowser` 依赖升级并精确锁定为 `0.5.8`；本次 Linux ARM64 Docker 构建使用 Chromium `146.0.7680.177.3`
+- `cloakbrowser` 依赖精确锁定为 `0.3.21`；Linux ARM64 Docker 构建使用 Chromium `145.0.7632.159.7`
 - 所有模式统一使用 `cloakbrowser/puppeteer`，移除 IUAM 专用 Rebrowser provider 及其启动依赖
 - 移除 `puppeteer-real-browser` 整包依赖，避免继续依赖黑盒 wrapper
-- Docker Compose 默认通过 Xvfb 运行 headful CloakBrowser，并固定 timezone 与 locale
+- Docker Compose 默认通过 Xvfb 运行 headful CloakBrowser；timezone 与 locale 默认留空，需按代理出口显式设置
 - Docker 构建阶段预下载 CloakBrowser binary，并将该层前移到源码复制之前以复用构建缓存，同时补充 emoji / 扩展字体包以降低 font/canvas 指纹异常
 - Turnstile 增加自有 widget 点击循环与 `cf-turnstile-response` token 读取，用于替代旧版 `turnstile:true` 的隐式交互层
 - README API 文档现已同步说明 `funcaptcha` 的 lab-only 边界与调用示例

@@ -7,6 +7,7 @@ const test = require('node:test')
 const solveIuam = require('../endpoints/cloudflare')
 const { openApiDocument } = require('../openapi')
 const { createCacheStore } = require('../utils/cacheStore')
+const { isCacheableIuamResult } = require('../utils/cachePolicy')
 const { createSemaphore } = require('../utils/semaphore')
 const {
   clickIuamTurnstileOnce,
@@ -55,6 +56,16 @@ test('cache persists atomically and exposes readiness state', async (t) => {
   )
 })
 
+test('IUAM cache only accepts strict cookie matches', () => {
+  assert.equal(isCacheableIuamResult({ clearanceSource: 'strict_cookie_match' }), true)
+  assert.equal(
+    isCacheableIuamResult({ clearanceSource: 'interaction_strict_cookie_match' }),
+    true
+  )
+  assert.equal(isCacheableIuamResult({ clearanceSource: 'verified_non_json_cookie_match' }), false)
+  assert.equal(isCacheableIuamResult(null), false)
+})
+
 test('OpenAPI document describes all public endpoints and timeout contract', () => {
   assert.equal(openApiDocument.openapi, '3.1.0')
   for (const route of ['/cloudflare', '/health', '/ready', '/openapi.json', '/docs']) {
@@ -92,10 +103,13 @@ function createIuamPage({
       url: () => 'https://example.com/cdn-cgi/challenge-platform/flow/ov1',
       request: () => ({
         method: () => 'POST',
-        headers: () => ({ 'content-type': contentType }),
+        headers: () => ({}),
         isNavigationRequest: () => false,
       }),
-      headers: () => ({ 'set-cookie': `cf_clearance=${value}; Path=/` }),
+      headers: () => ({
+        'content-type': contentType,
+        'set-cookie': `cf_clearance=${value}; Path=/`,
+      }),
     })
   }
 

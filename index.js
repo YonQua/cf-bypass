@@ -4,6 +4,7 @@ const { createLogger, normalizeError, createError } = require('./utils/errors')
 const { normalizeProxy, buildProxyCacheKeyValue } = require('./utils/proxy')
 const { createBrowser, closeBrowser } = require('./utils/browser')
 const { createCacheStore } = require('./utils/cacheStore')
+const { isCacheableIuamResult } = require('./utils/cachePolicy')
 const { createSemaphore } = require('./utils/semaphore')
 const { normalizeUrl, validateDomain } = require('./utils/domain')
 const { withTimeout } = require('./utils/async')
@@ -372,8 +373,12 @@ app.post('/cloudflare', async (req, res) => {
     )
 
     if (data.mode === 'iuam' && useCache) {
-      const { publicResult } = splitInternalResult(result)
-      cacheStore.set(cacheKey, publicResult)
+      const { publicResult, internalMeta } = splitInternalResult(result)
+      // Non-JSON transition cookies are only page-verified; without a strict
+      // challenge response they are not durable enough to reuse across requests.
+      if (isCacheableIuamResult(internalMeta)) {
+        cacheStore.set(cacheKey, publicResult)
+      }
     }
   } catch (err) {
     const normalized = normalizeError(err)

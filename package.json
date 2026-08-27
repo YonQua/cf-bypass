@@ -8,7 +8,7 @@
     "test": "node --test"
   },
   "dependencies": {
-    "cloakbrowser": "0.5.9",
+    "cloakbrowser": "0.3.21",
     "express": "^5.1.0",
     "puppeteer-core": "^24.43.0"
   },
