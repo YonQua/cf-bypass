@@ -31,8 +31,8 @@ function extractClearanceFromSetCookieHeader(setCookieHeader) {
 }
 
 function extractClearanceCandidate(response) {
-  // 严格候选必须来自 challenge POST 的 JSON 响应和 Set-Cookie；
-  // 普通 cookie 或非 JSON 响应只能作为待验证候选，不能直接返回。
+  // Clearance 只能观察自 challenge platform 的 POST Set-Cookie；普通页面
+  // cookie 不得直接作为结果，JSON 与页面稳定性分别决定 strict/fallback。
   if (!isChallengePlatformUrl(response.url())) return null
 
   const request = response.request()
@@ -83,12 +83,22 @@ async function challengeCleared(page, expectedOrigin, mainDocument) {
     return await page.evaluate(
       ({ origin, titles, selectors }) => {
         const title = document.title.trim().toLowerCase()
+        const hasActiveChallengeSelector = selectors.some((selector) => {
+          if (selector === '[name="cf-turnstile-response"]') {
+            // Cloudflare keeps populated response inputs after success; only
+            // an empty response input still represents an active challenge.
+            return [...document.querySelectorAll(selector)].some(
+              (element) => !element.value?.trim()
+            )
+          }
+          return Boolean(document.querySelector(selector))
+        })
         return (
           location.origin === origin &&
           document.readyState !== 'loading' &&
           !(
             titles.some((value) => title.includes(value)) ||
-            selectors.some((selector) => document.querySelector(selector))
+            hasActiveChallengeSelector
           )
         )
       },
@@ -174,6 +184,8 @@ async function cloudflare(data, page) {
     }
 
     async function verifyFallbackCandidate(candidate) {
+      // linux.do 等 managed challenge 可能只返回 non-JSON 过渡 cookie；只有
+      // 同源主文档稳定通过、连续两次检查一致且 cookie jar 精确匹配时才可返回。
       if (candidate !== fallbackCandidate || strictCandidate) return false
       if (!(await challengeCleared(page, expectedOrigin, mainDocument))) return false
 

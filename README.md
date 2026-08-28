@@ -83,6 +83,14 @@ docker compose up --build -d
 - 如需后续切换到其他 CloakBrowser binary，可通过 `CLOAKBROWSER_BINARY_PATH=/app/.cloakbrowser/chromium-<version>/chrome` 显式指定；该路径必须在容器内真实存在
 - CloakBrowser binary 受其独立 Binary License 约束；内部授权测试可用，若作为第三方浏览器服务提供需先确认 OEM/SaaS 授权
 
+IUAM clearance 强制验收要求（适用于 `linux.do` 等 managed challenge）：
+
+- 候选必须来自 Cloudflare challenge platform URL 的 `POST` 响应 `Set-Cookie`，普通页面 cookie 不得直接作为结果。
+- strict 结果必须是 challenge 响应的 JSON `Content-Type`，并且与浏览器当前 cookie jar 中的 `cf_clearance` 完全一致。
+- non-JSON 过渡 cookie 只有在目标主文档同源、状态正常、没有 `cf-mitigated: challenge`、页面不再显示 challenge，且连续两次稳定检查通过后才可返回。
+- 点击 Turnstile 只用于推进 challenge，不能作为 clearance 来源；non-JSON 结果不得写入缓存，每次请求重新验证。
+- 返回 clearance 时必须同时保留同一浏览器上下文产生的 `user_agent`；跨客户端（例如 curl）重放不属于本服务的成功证明。
+
 Docker/CloakBrowser 排障要点：
 
 - `browserPlatform` 是请求级覆盖项，会优先于 `BROWSER_PLATFORM`；测试脚本若显式传入平台，会覆盖 Compose 默认值。

@@ -91,6 +91,8 @@ function createIuamPage({
   mainStatus = 200,
   cfMitigated = null,
   followupClearance = null,
+  executeChallengeCheck = false,
+  emptyResponseCount = 0,
 }) {
   let responseHandler = null
   let cookieIndex = 0
@@ -138,6 +140,29 @@ function createIuamPage({
     },
     async evaluate(_callback, ...args) {
       if (args.length > 0) {
+        if (executeChallengeCheck) {
+          const previousDocument = global.document
+          const previousLocation = global.location
+          global.document = {
+            title: 'Target page',
+            readyState: 'complete',
+            querySelector: (selector) =>
+              selector === '[name="cf-turnstile-response"]' && emptyResponseCount === 0
+                ? { value: 'token' }
+                : null,
+            querySelectorAll: (selector) =>
+              selector === '[name="cf-turnstile-response"]'
+                ? [{ value: 'token' }, ...Array(emptyResponseCount).fill({ value: '' })]
+                : [],
+          }
+          global.location = { origin: 'https://example.com' }
+          try {
+            return _callback(...args)
+          } finally {
+            global.document = previousDocument
+            global.location = previousLocation
+          }
+        }
         const cleared =
           challengeClearedResults[
             Math.min(challengeCheckIndex, challengeClearedResults.length - 1)
@@ -187,6 +212,37 @@ test('IUAM accepts a matched non-JSON clearance after the target page is complet
 
   assert.equal(result.cf_clearance, 'final-clearance')
   assert.equal(result._meta.clearanceSource, 'verified_non_json_cookie_match')
+})
+
+test('IUAM accepts a populated Turnstile response left on the target page', async () => {
+  const result = await solveIuam(
+    { domain: 'https://example.com', timeoutMs: 3500 },
+    createIuamPage({
+      strictClearance: 'final-clearance',
+      cookieValues: ['final-clearance'],
+      responseContentType: 'text/plain;charset=UTF-8',
+      executeChallengeCheck: true,
+    })
+  )
+
+  assert.equal(result.cf_clearance, 'final-clearance')
+  assert.equal(result._meta.clearanceSource, 'verified_non_json_cookie_match')
+})
+
+test('IUAM keeps waiting when any Turnstile response input is empty', async () => {
+  await assert.rejects(
+    solveIuam(
+      { domain: 'https://example.com', timeoutMs: 1000 },
+      createIuamPage({
+        strictClearance: 'transition-clearance',
+        cookieValues: ['transition-clearance'],
+        responseContentType: 'text/plain',
+        executeChallengeCheck: true,
+        emptyResponseCount: 1,
+      })
+    ),
+    (error) => error.code === 504 && error.detail?.phase === 'iuam_wait_clearance'
+  )
 })
 
 test('IUAM ignores a non-JSON challenge cookie while the challenge page remains', async () => {
