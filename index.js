@@ -1,10 +1,8 @@
 const express = require('express')
 const config = require('./config')
 const { createLogger, normalizeError, createError } = require('./utils/errors')
-const { normalizeProxy, buildProxyCacheKeyValue } = require('./utils/proxy')
+const { normalizeProxy } = require('./utils/proxy')
 const { createBrowser, closeBrowser } = require('./utils/browser')
-const { createCacheStore } = require('./utils/cacheStore')
-const { isCacheableIuamResult } = require('./utils/cachePolicy')
 const { createSemaphore } = require('./utils/semaphore')
 const { normalizeUrl, validateDomain } = require('./utils/domain')
 const { withTimeout } = require('./utils/async')
@@ -56,12 +54,6 @@ function remainingTime(deadline) {
 function createRequestId() {
   requestCounter = (requestCounter + 1) % Number.MAX_SAFE_INTEGER
   return `${Date.now()}-${requestCounter}`
-}
-
-function buildIuamCacheKey(data) {
-  const domain = normalizeUrl(data?.domain, { keepSearch: true, emptyValue: '' })
-  const proxy = buildProxyCacheKeyValue(data?.proxy)
-  return JSON.stringify({ mode: 'iuam', domain, proxy, browserPlatform: data.browserPlatform })
 }
 
 function buildLogTarget(domain) {
@@ -178,19 +170,6 @@ function logHandlerFailure(options) {
 
 const logger = createLogger({ timeZone: config.logTimeZone, level: config.logLevel })
 
-const cacheStore = createCacheStore({
-  filePath: config.cache.file,
-  dirPath: config.cache.dir,
-  ttlMs: config.cache.ttlMs,
-  flushIntervalMs: config.cache.flushIntervalMs,
-  flushDebounceMs: config.cache.flushDebounceMs,
-  logger,
-})
-
-cacheStore.start().catch((err) => {
-  logger.warn('event=cache_start_failed', { error: err.message })
-})
-
 const semaphore = createSemaphore(config.browserLimit)
 
 app.use(express.json())
@@ -216,10 +195,7 @@ app.use((req, res, next) => {
       ip: clientIp,
       mode: req.body?.mode || 'unknown',
       target: buildLogTarget(req.body?.domain) || 'unknown',
-      cache_enabled:
-        req.body?.mode === 'iuam'
-          ? req.body?.cache !== false && req.body?.cache !== 'false'
-          : undefined,
+      cache_enabled: req.body?.mode === 'iuam' ? false : undefined,
     })
   }
   next()
@@ -290,29 +266,6 @@ app.post('/cloudflare', async (req, res) => {
     })
   }
 
-  const useCache = data?.cache !== false && data?.cache !== 'false'
-  let cacheKey
-  if (data.mode === 'iuam' && useCache) {
-    stage = 'cache_lookup'
-    cacheKey = buildIuamCacheKey(data)
-    const cached = cacheStore.get(cacheKey)
-    if (cached) {
-      logger.info(
-        'event=request_complete',
-        buildRequestMeta({
-          requestId,
-          mode: data.mode,
-          target,
-          code: 200,
-          requestElapsedMs: Date.now() - requestStartedAt,
-          cacheHit: true,
-          proxyEnabled: Boolean(data.proxy),
-        })
-      )
-      return res.status(200).json({ ...cached, cached: true })
-    }
-  }
-
   const release = semaphore.tryAcquire()
   if (!release) {
     stage = 'semaphore_acquire'
@@ -371,15 +324,6 @@ app.post('/cloudflare', async (req, res) => {
         message: `Request timeout after ${requestTimeout}ms`,
       }
     )
-
-    if (data.mode === 'iuam' && useCache) {
-      const { publicResult, internalMeta } = splitInternalResult(result)
-      // Non-JSON transition cookies are only page-verified; without a strict
-      // challenge response they are not durable enough to reuse across requests.
-      if (isCacheableIuamResult(internalMeta)) {
-        cacheStore.set(cacheKey, publicResult)
-      }
-    }
   } catch (err) {
     const normalized = normalizeError(err)
     failurePhase = normalized.detail?.phase || stage
@@ -446,11 +390,9 @@ app.get('/health', (req, res) => {
 })
 
 app.get('/ready', (req, res) => {
-  const cache = cacheStore.getState()
-  const ready = !shuttingDown && cache.loaded && !cache.lastError
+  const ready = !shuttingDown
   res.status(ready ? 200 : 503).json({
     status: ready ? 'ready' : 'not_ready',
-    cache,
     concurrency: semaphore.getState(),
   })
 })
@@ -507,10 +449,6 @@ async function gracefulShutdown(signal) {
         }
         resolve()
       })
-    })
-
-    await cacheStore.stop().catch((err) => {
-      logger.warn('event=cache_stop_failed', { error: err.message })
     })
 
     clearTimeout(shutdownTimer)

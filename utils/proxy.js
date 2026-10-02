@@ -92,16 +92,7 @@ function normalizeProxy(proxy) {
   return normalized
 }
 
-function buildProxyCacheKeyValue(proxy) {
-  if (!proxy) return null
-  return {
-    url: proxy.url,
-    username: proxy.username || null,
-  }
-}
-
 module.exports = {
-  buildProxyCacheKeyValue,
   normalizeProxy,
   normalizeProxyUrl,
 }

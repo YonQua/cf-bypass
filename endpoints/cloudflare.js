@@ -1,11 +1,10 @@
-const { applyProxyAuthentication } = require('../utils/browser')
+const { applyProxyAuthentication, readClearanceCookie } = require('../utils/browser')
 const { createError } = require('../utils/errors')
 const { sleep } = require('../utils/async')
 const { clickIuamTurnstileOnce } = require('../utils/turnstile/clicker')
 
 const POLL_INTERVAL_MS = 100
 const CLICK_INTERVAL_MS = 2000
-const CHALLENGE_CLEAR_DEBOUNCE_MS = 250
 const CHALLENGE_TITLES = ['just a moment', 'attention required', '请稍候']
 const CHALLENGE_SELECTORS = [
   '#cf-challenge-running',
@@ -14,38 +13,6 @@ const CHALLENGE_SELECTORS = [
   '#turnstile-wrapper',
   '[name="cf-turnstile-response"]',
 ]
-
-function isChallengePlatformUrl(url) {
-  return typeof url === 'string' && url.includes('/cdn-cgi/challenge-platform/')
-}
-
-function isJsonContentType(headers) {
-  const raw = headers?.['content-type'] || headers?.['Content-Type'] || ''
-  return String(raw).toLowerCase().includes('application/json')
-}
-
-function extractClearanceFromSetCookieHeader(setCookieHeader) {
-  if (!setCookieHeader) return null
-  const raw = Array.isArray(setCookieHeader) ? setCookieHeader.join('\n') : String(setCookieHeader)
-  return raw.match(/cf_clearance=([^;]+)/)?.[1] || null
-}
-
-function extractClearanceCandidate(response) {
-  // Clearance 只能观察自 challenge platform 的 POST Set-Cookie；普通页面
-  // cookie 不得直接作为结果，JSON 与页面稳定性分别决定 strict/fallback。
-  if (!isChallengePlatformUrl(response.url())) return null
-
-  const request = response.request()
-  if (request?.method?.() !== 'POST') return null
-
-  const value = extractClearanceFromSetCookieHeader(response.headers?.()['set-cookie'])
-  if (!value) return null
-
-  return {
-    value,
-    strict: isJsonContentType(response.headers?.() || {}),
-  }
-}
 
 function extractMainDocument(response, page) {
   try {
@@ -109,11 +76,6 @@ async function challengeCleared(page, expectedOrigin, mainDocument) {
   }
 }
 
-async function readClearanceCookie(page) {
-  const cookies = await page.cookies().catch(() => [])
-  return cookies.find((cookie) => cookie.name === 'cf_clearance' && cookie.value)?.value || null
-}
-
 async function cloudflare(data, page) {
   if (!data.domain) throw createError('Missing domain parameter', 400)
 
@@ -121,36 +83,37 @@ async function cloudflare(data, page) {
   const timeoutMs = Number(data.timeoutMs) || data.defaultTimeoutMs || 60000
   const deadline = startedAtMs + timeoutMs
   const expectedOrigin = new URL(data.domain).origin
-  let generation = 0
-  let strictCandidate = null
-  let fallbackCandidate = null
+  let initialClearance = null
   let mainDocument = null
   let nextClickAtMs = 0
   let interactionAttempted = false
 
+  const onRequest = (request) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+      mainDocument = null
+    }
+  }
   const onResponse = (response) => {
-    try {
-      const documentResponse = extractMainDocument(response, page)
-      if (documentResponse) mainDocument = documentResponse
-
-      const candidate = extractClearanceCandidate(response)
-      if (!candidate) return
-
-      generation += 1
-      const observedCandidate = { ...candidate, generation }
-      if (candidate.strict) strictCandidate = observedCandidate
-      else fallbackCandidate = observedCandidate
-
-      data.logger?.debug?.('event=iuam_candidate_observed', {
-        request_id: data.requestId,
-        mode: 'iuam',
-        source: candidate.strict ? 'json' : 'non_json',
-        generation,
-        clearance_length: candidate.value.length,
-      })
-    } catch {}
+    const document = extractMainDocument(response, page)
+    if (document) mainDocument = document
   }
 
+  async function captureClearance() {
+    const document = mainDocument
+    if (!(await challengeCleared(page, expectedOrigin, document))) return null
+
+    const clearance = await readClearanceCookie(page, data.domain)
+    if (!clearance || (initialClearance && clearance === initialClearance)) return null
+    const userAgent = await page.evaluate(() => navigator.userAgent)
+    if (!(await challengeCleared(page, expectedOrigin, document))) return null
+    const current = await readClearanceCookie(page, data.domain)
+    if (Date.now() >= deadline || document !== mainDocument || current !== clearance) {
+      return null
+    }
+    return { cf_clearance: current, user_agent: userAgent }
+  }
+
+  page.on('request', onRequest)
   page.on('response', onResponse)
 
   try {
@@ -160,66 +123,38 @@ async function cloudflare(data, page) {
       timeout: Math.max(1, deadline - Date.now()),
     })
 
-    const userAgent = await page.evaluate(() => navigator.userAgent).catch(() => null)
-
-    function buildResult(candidate, source) {
-      data.logger?.info?.('event=iuam_clearance_selected', {
-        request_id: data.requestId,
-        mode: 'iuam',
-        source,
-        generation: candidate.generation,
-        clearance_length: candidate.value.length,
-        elapsed_ms: Date.now() - startedAtMs,
-      })
-      return {
-        cf_clearance: candidate.value,
-        user_agent: userAgent,
-        elapsed_time: (Date.now() - startedAtMs) / 1000,
-        _meta: {
-          enteredClickMode: interactionAttempted,
-          clearanceSource: source,
-          candidateGeneration: candidate.generation,
-        },
-      }
-    }
-
-    async function verifyFallbackCandidate(candidate) {
-      // linux.do 等 managed challenge 可能只返回 non-JSON 过渡 cookie；只有
-      // 同源主文档稳定通过、连续两次检查一致且 cookie jar 精确匹配时才可返回。
-      if (candidate !== fallbackCandidate || strictCandidate) return false
-      if (!(await challengeCleared(page, expectedOrigin, mainDocument))) return false
-
-      await sleep(Math.min(CHALLENGE_CLEAR_DEBOUNCE_MS, Math.max(1, deadline - Date.now())))
-      if (candidate !== fallbackCandidate || strictCandidate) return false
-      if (!(await challengeCleared(page, expectedOrigin, mainDocument))) return false
-
-      const currentClearance = await readClearanceCookie(page)
-      return candidate === fallbackCandidate && !strictCandidate && currentClearance === candidate.value
-    }
-
     while (Date.now() < deadline) {
+      const snapshot = await captureClearance()
+      if (snapshot) {
+        if (!initialClearance) {
+          // 页面通过后的首个 Cookie 可能仍是过渡值，当前完成条件要求再次更新。
+          initialClearance = snapshot.cf_clearance
+          data.logger?.debug?.('event=iuam_clearance_update_waiting', {
+            request_id: data.requestId,
+            mode: 'iuam',
+          })
+        } else {
+          data.logger?.info?.('event=iuam_clearance_selected', {
+            request_id: data.requestId,
+            mode: 'iuam',
+            source: 'updated_browser_cookie',
+            clearance_length: snapshot.cf_clearance.length,
+            elapsed_ms: Date.now() - startedAtMs,
+          })
+          return {
+            ...snapshot,
+            elapsed_time: (Date.now() - startedAtMs) / 1000,
+            _meta: {
+              enteredClickMode: interactionAttempted,
+              clearanceSource: 'updated_browser_cookie',
+            },
+          }
+        }
+      }
+
       const nowMs = Date.now()
-      const clearanceCookie = await readClearanceCookie(page)
-
-      // 严格结果还必须与 cookie jar 当前值一致，避免返回挑战过程中的随机 cookie。
-      if (strictCandidate && clearanceCookie === strictCandidate.value) {
-        return buildResult(
-          strictCandidate,
-          interactionAttempted ? 'interaction_strict_cookie_match' : 'strict_cookie_match'
-        )
-      }
-
-      if (
-        !strictCandidate &&
-        fallbackCandidate &&
-        clearanceCookie === fallbackCandidate.value &&
-        (await verifyFallbackCandidate(fallbackCandidate))
-      ) {
-        return buildResult(fallbackCandidate, 'verified_non_json_cookie_match')
-      }
-
       // 交互只推进挑战，不参与 clearance 判定。
-      if (nowMs >= nextClickAtMs) {
+      if (!initialClearance && nowMs >= nextClickAtMs) {
         const clicked = await clickIuamTurnstileOnce(page).catch(() => false)
         interactionAttempted = interactionAttempted || clicked
         nextClickAtMs = nowMs + CLICK_INTERVAL_MS
@@ -231,11 +166,11 @@ async function cloudflare(data, page) {
     throw createError(`IUAM timeout after ${timeoutMs}ms`, 504, {
       timeoutMs,
       label: 'IUAM',
-      phase: 'iuam_wait_clearance',
+      phase: initialClearance ? 'iuam_wait_clearance_update' : 'iuam_wait_clearance',
       enteredClickMode: interactionAttempted,
-      candidateGeneration: generation,
     })
   } finally {
+    page.off('request', onRequest)
     page.off('response', onResponse)
   }
 }

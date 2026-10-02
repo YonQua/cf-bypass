@@ -70,26 +70,27 @@ docker compose up --build -d
 日志级别说明：
 
 - `info`（默认）：保留 `server_*`、`request_complete`、`handler_reject`、`handler_error` 这类摘要与异常日志
-- `debug`：额外输出 `request_start`、`browser_ready`、`cache_purge` 等排障细节
+- `debug`：额外输出 `request_start`、`browser_ready`、`iuam_clearance_update_waiting` 等排障细节
 - logger 会自动省略 `null` / `undefined` 字段，避免成功日志被空值刷屏
 - 摘要日志中的 `target` 会保留协议、主机与路径，但默认省略 query / hash，兼顾定位与降噪
 
 浏览器运行时说明：
 
 - 所有模式统一使用 `cloakbrowser/puppeteer`
-- IUAM 优先接受 strict JSON challenge response 的 `Set-Cookie` 与 cookie jar 完全一致的 clearance；在页面已明确通过且 cookie jar 一致时，也可接受 non-JSON 过渡 cookie；点击只推进挑战，不作为 clearance 来源
+- IUAM 从浏览器上下文 Cookie 存储读取目标域名的 `cf_clearance`，页面通过后继续读取，Cookie 更新后自动返回并关闭浏览器；点击只推进挑战。
 - 当前 `cloakbrowser` 依赖锁定为 `0.3.21`；Linux ARM64 镜像构建时使用 Chromium `145.0.7632.159.7`，macOS ARM64 本地 binary 为 `145.0.7632.109.2`
 - Docker Compose 使用 `xvfb-run -a npm start` 启动 headful CloakBrowser，以贴近真实桌面浏览器环境
 - 如需后续切换到其他 CloakBrowser binary，可通过 `CLOAKBROWSER_BINARY_PATH=/app/.cloakbrowser/chromium-<version>/chrome` 显式指定；该路径必须在容器内真实存在
 - CloakBrowser binary 受其独立 Binary License 约束；内部授权测试可用，若作为第三方浏览器服务提供需先确认 OEM/SaaS 授权
 
-IUAM clearance 强制验收要求（适用于 `linux.do` 等 managed challenge）：
+IUAM clearance 自动获取要求：
 
-- 候选必须来自 Cloudflare challenge platform URL 的 `POST` 响应 `Set-Cookie`，普通页面 cookie 不得直接作为结果。
-- strict 结果必须是 challenge 响应的 JSON `Content-Type`，并且与浏览器当前 cookie jar 中的 `cf_clearance` 完全一致。
-- non-JSON 过渡 cookie 只有在目标主文档同源、状态正常、没有 `cf-mitigated: challenge`、页面不再显示 challenge，且连续两次稳定检查通过后才可返回。
-- 点击 Turnstile 只用于推进 challenge，不能作为 clearance 来源；non-JSON 结果不得写入缓存，每次请求重新验证。
-- 返回 clearance 时必须同时保留同一浏览器上下文产生的 `user_agent`；跨客户端（例如 curl）重放不属于本服务的成功证明。
+- 从当前浏览器上下文存储读取 Cookie，核对目标域名、路径及分区，返回原始值和同一浏览器的 UA。
+- 目标主文档必须同源、状态正常、没有 `cf-mitigated: challenge`，页面不再显示挑战。
+- 初始 Cookie 获取后继续读取浏览器存储；观察到值更新后重新检查页面通过状态，读取对应 UA，再确认页面与 Cookie 未变化并自动返回、关闭浏览器。无需手动关闭窗口或按回车。
+- 当前完成条件要求初始 Cookie 后至少一次更新；不发生更新的网站会在总预算耗尽时返回 504，不能视作已验证兼容。
+- 总超时返回 504。返回的是当前浏览器快照，不保证后续 Cookie 不再轮换，也不保证其他接口或其他客户端可用。
+- 此路径不写入缓存，避免复用先前的 Cookie。
 
 Docker/CloakBrowser 排障要点：
 
@@ -119,7 +120,7 @@ Docker/CloakBrowser 排障要点：
 - `domain`：必填，必须是合法的 `http://` 或 `https://` URL，且不能包含用户名/密码
 - `siteKey`：`turnstile` 模式必填
 - `timeoutMs`：可选，整数 `1000–300000`；表示从服务收到请求开始计算的总预算，优先于全局 `REQUEST_TIMEOUT_MS`
-- `cache`：可选，仅对 `iuam` 生效；设为 `false` 时跳过缓存
+- `cache`：保留兼容；当前所有请求均不读取或写入缓存
 - `browserPlatform`：可选，浏览器指纹平台；仅允许 `windows`、`macos`、`linux`，默认 `macos`。当前 Linux 容器缺少完整 Windows 字体集，不建议使用 `windows`；`linux` 可用于容器原生指纹测试
 - `debugArtifacts`：可选，仅建议排障时设为 `true`；`turnstile` 失败时会输出页面诊断工件路径
 - `proxy`：可选，代理对象格式如下
@@ -157,14 +158,7 @@ Turnstile 超时排障说明：
 - 若提供认证信息，`username` 和 `password` 必须同时提供
 - Chromium 对 SOCKS5 用户名密码认证的兼容性通常不如 HTTP / HTTPS 代理稳定
 
-IUAM 缓存说明：
-
-- 缓存键基于轻量规范化后的 `domain`、`proxy` 与 `browserPlatform`，不同指纹平台不会共享 clearance
-- 只有来自 strict JSON challenge response 且与 cookie jar 一致的 clearance 才会写入缓存；仅通过页面状态验证的非 JSON 过渡 cookie 每次请求重新获取
-- 规范化仅用于缓存键：会统一协议/主机大小写、去默认端口、忽略 URL 片段，并把裸域与根路径 `/` 视为同义
-- 不会改动真实请求 URL
-
-IUAM 返回示例：
+IUAM 每次新建浏览器会话，不读取或写入 clearance 缓存。请求中的 `cache` 字段保留兼容，当前不影响获取流程。
 
 ```json
 {
@@ -228,7 +222,7 @@ FunCaptcha 返回示例：
 
 ### 服务说明与就绪检查
 
-- `GET /ready`：检查服务是否未进入退出流程、缓存是否成功加载，并返回缓存与并发状态
+- `GET /ready`：检查服务是否未进入退出流程，并返回并发状态；不依赖旧缓存文件
 - `GET /openapi.json`：返回 OpenAPI 3.1 JSON，可直接导入 Postman、Insomnia 或代码生成工具
 - `GET /docs`：使用 ReDoc 展示交互式接口说明；页面脚本来自 ReDoc CDN，离线环境请直接使用 `/openapi.json`
 

@@ -1,8 +1,3 @@
-const path = require('path')
-
-const CACHE_DIR = path.join(__dirname, '..', 'cache')
-const CACHE_FILE = path.join(CACHE_DIR, 'cache.json')
-
 function parseBooleanEnv(value, defaultValue) {
   if (value == null) return defaultValue
   const normalized = String(value).trim().toLowerCase()
@@ -43,12 +38,5 @@ module.exports = {
     stealthArgs: parseBooleanEnv(readEnv('CLOAKBROWSER_STEALTH_ARGS'), true),
     timezone: readEnv('CLOAKBROWSER_TIMEZONE'),
     locale: readEnv('CLOAKBROWSER_LOCALE'),
-  },
-  cache: {
-    dir: CACHE_DIR,
-    file: CACHE_FILE,
-    ttlMs: 5 * 60 * 1000,
-    flushIntervalMs: 30 * 1000,
-    flushDebounceMs: 1000,
   },
 }

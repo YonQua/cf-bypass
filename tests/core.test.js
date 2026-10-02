@@ -87,7 +87,7 @@ function createIuamPage({
   strictClearance,
   cookieValues,
   responseContentType = 'application/json',
-  challengeClearedResults = [],
+  challengeClearedResults = [true],
   mainStatus = 200,
   cfMitigated = null,
   followupClearance = null,
@@ -96,7 +96,6 @@ function createIuamPage({
 }) {
   let responseHandler = null
   let cookieIndex = 0
-  let evaluateCount = 0
   let challengeCheckIndex = 0
   const mainFrame = {}
 
@@ -170,13 +169,16 @@ function createIuamPage({
         challengeCheckIndex += 1
         return cleared
       }
-      evaluateCount += 1
-      return evaluateCount === 1 ? 'test-user-agent' : null
+      return 'test-user-agent'
     },
-    async cookies() {
-      const value = cookieValues[Math.min(cookieIndex, cookieValues.length - 1)]
-      cookieIndex += 1
-      return value ? [{ name: 'cf_clearance', value }] : []
+    browserContext() {
+      return {
+        async cookies() {
+          const value = cookieValues[Math.min(cookieIndex, cookieValues.length - 1)]
+          cookieIndex += 1
+          return value ? [{ name: 'cf_clearance', value, domain: 'example.com', path: '/' }] : []
+        },
+      }
     },
     $$: async () => [],
     mouse: { click: async () => {} },
@@ -184,49 +186,54 @@ function createIuamPage({
   }
 }
 
-test('IUAM ignores a random cookie until it matches strict response clearance', async () => {
+test('IUAM reads the latest browser cookie when it changes during capture', async () => {
   const result = await solveIuam(
-    { domain: 'https://example.com', timeoutMs: 1000 },
+    { domain: 'https://example.com', timeoutMs: 5000 },
     createIuamPage({
       strictClearance: 'final-clearance',
-      cookieValues: ['random-transition-value', 'final-clearance'],
+      cookieValues: [
+        'initial-clearance',
+        'initial-clearance',
+        'random-transition-value',
+        'final-clearance',
+      ],
     })
   )
 
   assert.equal(result.cf_clearance, 'final-clearance')
   assert.notEqual(result.cf_clearance, 'random-transition-value')
   assert.equal(result.user_agent, 'test-user-agent')
-  assert.equal(result._meta.clearanceSource, 'strict_cookie_match')
+  assert.equal(result._meta.clearanceSource, 'updated_browser_cookie')
 })
 
-test('IUAM accepts a matched non-JSON clearance after the target page is complete', async () => {
+test('IUAM accepts an updated browser cookie independently of response content type', async () => {
   const result = await solveIuam(
-    { domain: 'https://example.com', timeoutMs: 3500 },
+    { domain: 'https://example.com', timeoutMs: 5000 },
     createIuamPage({
       strictClearance: 'final-clearance',
-      cookieValues: ['final-clearance'],
+      cookieValues: ['initial-clearance', 'initial-clearance', 'final-clearance'],
       responseContentType: 'text/plain;charset=UTF-8',
       challengeClearedResults: [true, true],
     })
   )
 
   assert.equal(result.cf_clearance, 'final-clearance')
-  assert.equal(result._meta.clearanceSource, 'verified_non_json_cookie_match')
+  assert.equal(result._meta.clearanceSource, 'updated_browser_cookie')
 })
 
 test('IUAM accepts a populated Turnstile response left on the target page', async () => {
   const result = await solveIuam(
-    { domain: 'https://example.com', timeoutMs: 3500 },
+    { domain: 'https://example.com', timeoutMs: 5000 },
     createIuamPage({
       strictClearance: 'final-clearance',
-      cookieValues: ['final-clearance'],
+      cookieValues: ['initial-clearance', 'initial-clearance', 'final-clearance'],
       responseContentType: 'text/plain;charset=UTF-8',
       executeChallengeCheck: true,
     })
   )
 
   assert.equal(result.cf_clearance, 'final-clearance')
-  assert.equal(result._meta.clearanceSource, 'verified_non_json_cookie_match')
+  assert.equal(result._meta.clearanceSource, 'updated_browser_cookie')
 })
 
 test('IUAM keeps waiting when any Turnstile response input is empty', async () => {
@@ -293,35 +300,35 @@ test('IUAM rejects a non-JSON candidate from a mitigated main document', async (
   )
 })
 
-test('IUAM invalidates an older non-JSON candidate when generation changes', async () => {
+test('IUAM waits for a cookie update after capturing the initial snapshot', async () => {
   const result = await solveIuam(
-    { domain: 'https://example.com', timeoutMs: 3500 },
+    { domain: 'https://example.com', timeoutMs: 5000 },
     createIuamPage({
       strictClearance: 'old-clearance',
       followupClearance: 'new-clearance',
-      cookieValues: ['old-clearance', 'new-clearance'],
+      cookieValues: ['old-clearance', 'old-clearance', 'new-clearance'],
       responseContentType: 'text/plain',
       challengeClearedResults: [true, true, true],
     })
   )
 
   assert.equal(result.cf_clearance, 'new-clearance')
-  assert.equal(result._meta.candidateGeneration, 2)
+  assert.equal(result._meta.clearanceSource, 'updated_browser_cookie')
 })
 
-test('IUAM keeps strict evidence when a later non-JSON candidate appears', async () => {
+test('IUAM returns the browser snapshot despite a different response candidate', async () => {
   const result = await solveIuam(
-    { domain: 'https://example.com', timeoutMs: 1000 },
+    { domain: 'https://example.com', timeoutMs: 5000 },
     createIuamPage({
       strictClearance: 'strict-clearance',
       followupClearance: 'new-transition-clearance',
-      cookieValues: ['unmatched', 'strict-clearance'],
-      challengeClearedResults: [false],
+      cookieValues: ['unmatched', 'unmatched', 'strict-clearance'],
+      challengeClearedResults: [true],
     })
   )
 
   assert.equal(result.cf_clearance, 'strict-clearance')
-  assert.equal(result._meta.clearanceSource, 'strict_cookie_match')
+  assert.equal(result._meta.clearanceSource, 'updated_browser_cookie')
 })
 
 function createTurnstilePage({ resultCount = 1, candidate = null, clickError = null } = {}) {

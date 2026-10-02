@@ -49,7 +49,7 @@ const openApiDocument = {
         tags: ['Solver'],
         summary: '执行指定挑战模式',
         description:
-          '`timeoutMs` 是从服务接收请求开始计算的总预算。`siteKey` 仅 Turnstile 必填；缓存仅 IUAM 生效。',
+          '`timeoutMs` 是从服务接收请求开始计算的总预算。`siteKey` 仅 Turnstile 必填；`cache` 字段保留兼容，当前不启用缓存。IUAM 保留初始 Cookie 后至少更新一次的完成条件，不发生更新会超时。',
         operationId: 'solveChallenge',
         requestBody: {
           required: true,
@@ -57,7 +57,7 @@ const openApiDocument = {
             'application/json': {
               schema: { $ref: '#/components/schemas/SolveRequest' },
               examples: {
-                iuam: { value: { mode: 'iuam', domain: 'https://example.com', cache: true } },
+                iuam: { value: { mode: 'iuam', domain: 'https://example.com', cache: false } },
                 turnstile: {
                   value: {
                     mode: 'turnstile',
@@ -115,8 +115,8 @@ const openApiDocument = {
         summary: '就绪状态',
         operationId: 'getReadiness',
         responses: {
-          200: { description: '依赖的本地状态已就绪' },
-          503: { description: '缓存加载失败或服务正在退出' },
+          200: { description: '服务运行中，未进入退出流程' },
+          503: { description: '服务正在退出' },
         },
       },
     },
@@ -151,7 +151,7 @@ const openApiDocument = {
           siteKey: { type: 'string', minLength: 1 },
           authToken: { type: 'string', format: 'password' },
           timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000, default: 60000 },
-          cache: { type: 'boolean', default: true },
+          cache: { type: 'boolean', description: '保留兼容，当前不影响求解流程。' },
           browserPlatform: {
             type: 'string',
             enum: ['windows', 'macos', 'linux'],
@@ -169,7 +169,7 @@ const openApiDocument = {
           cf_clearance: { type: 'string' },
           user_agent: { type: ['string', 'null'] },
           elapsed_time: { type: 'number' },
-          cached: { type: 'boolean' },
+          cached: { type: 'boolean', const: false },
         },
       },
       TokenResponse: {
