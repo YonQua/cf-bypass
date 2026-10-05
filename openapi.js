@@ -49,7 +49,7 @@ const openApiDocument = {
         tags: ['Solver'],
         summary: '执行指定挑战模式',
         description:
-          '`timeoutMs` 是从服务接收请求开始计算的总预算。`siteKey` 仅 Turnstile 必填；`cache` 字段保留兼容，当前不启用缓存。IUAM 保留初始 Cookie 后至少更新一次的完成条件，不发生更新会超时。',
+          '`timeoutMs` 是从服务接收请求开始计算的总预算。`siteKey` 仅 Turnstile 必填；`cache` 字段保留兼容，当前不启用缓存。IUAM 自动等待页面通过及已识别检测完成，返回浏览器 Cookie 和 UA，无需额外模式参数。预算耗尽返回 504，detail.phase/reason 描述等待原因。Turnstile 返回 Token，不等价于 cf_clearance 或业务验证通过。',
         operationId: 'solveChallenge',
         requestBody: {
           required: true,

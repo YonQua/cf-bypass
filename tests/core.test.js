@@ -84,67 +84,93 @@ test('OpenAPI document describes all public endpoints and timeout contract', () 
 })
 
 function createIuamPage({
-  strictClearance,
-  cookieValues,
-  responseContentType = 'application/json',
+  cookieValues = [],
   challengeClearedResults = [true],
   mainStatus = 200,
   cfMitigated = null,
-  followupClearance = null,
   executeChallengeCheck = false,
   emptyResponseCount = 0,
+  detection = null,
 }) {
-  let responseHandler = null
+  const handlers = new Map()
   let cookieIndex = 0
   let challengeCheckIndex = 0
   const mainFrame = {}
+  const detectionUrl = detection &&
+    `https://example.com/cdn-cgi/challenge-platform/scripts/${detection.kind}/main.js`
+  const detectionPostUrl = detection &&
+    `https://example.com/cdn-cgi/challenge-platform/h/b/${detection.kind}/result`
 
-  function emitCandidate(value, contentType) {
-    responseHandler?.({
-      url: () => 'https://example.com/cdn-cgi/challenge-platform/flow/ov1',
-      request: () => ({
-        method: () => 'POST',
-        headers: () => ({}),
-        isNavigationRequest: () => false,
-      }),
+  function emitDetection() {
+    if (!detection) return
+    const request = {
+      url: () => detection.scriptOnly ? detectionUrl : detectionPostUrl,
+      method: () => detection.scriptOnly ? 'GET' : 'POST',
+      resourceType: () => detection.scriptOnly ? 'script' : 'fetch',
+      isNavigationRequest: () => false,
+    }
+    handlers.get('request')?.(request)
+    const response = {
+      url: request.url,
+      request: () => request,
+      status: () => 200,
       headers: () => ({
-        'content-type': contentType,
-        'set-cookie': `cf_clearance=${value}; Path=/`,
+        'content-type': detection.contentType || 'text/plain',
+        ...(detection.cookie ? { 'set-cookie': `cf_clearance=${detection.cookie}; Path=/` } : {}),
       }),
-    })
+    }
+    handlers.get('response')?.(response)
+    if (detection.followupScript) {
+      const scriptRequest = {
+        url: () => detectionUrl,
+        method: () => 'GET',
+        resourceType: () => 'script',
+        isNavigationRequest: () => false,
+      }
+      handlers.get('request')?.(scriptRequest)
+      handlers.get('requestfinished')?.(scriptRequest)
+    }
+    if (!detection.unfinished) {
+      handlers.get(detection.failed ? 'requestfailed' : 'requestfinished')?.(request)
+    }
   }
 
   return {
     on(event, handler) {
-      if (event === 'response') responseHandler = handler
+      handlers.set(event, handler)
     },
     off(event, handler) {
-      if (event === 'response' && responseHandler === handler) responseHandler = null
+      if (handlers.get(event) === handler) handlers.delete(event)
     },
     async goto() {
-      if (!strictClearance) return
-      responseHandler?.({
+      const request = {
         url: () => 'https://example.com/',
-        request: () => ({
-          isNavigationRequest: () => true,
-          frame: () => mainFrame,
-        }),
+        method: () => 'GET',
+        resourceType: () => 'document',
+        isNavigationRequest: () => true,
+        frame: () => mainFrame,
+      }
+      handlers.get('request')?.(request)
+      handlers.get('response')?.({
+        url: request.url,
+        request: () => request,
         status: () => mainStatus,
         headers: () => (cfMitigated ? { 'cf-mitigated': cfMitigated } : {}),
       })
-      emitCandidate(strictClearance, responseContentType)
-      if (followupClearance) {
-        setTimeout(() => emitCandidate(followupClearance, 'text/plain'), 25)
-      }
+      handlers.get('domcontentloaded')?.()
+      emitDetection()
     },
     async evaluate(_callback, ...args) {
       if (args.length > 0) {
         if (executeChallengeCheck) {
           const previousDocument = global.document
           const previousLocation = global.location
+          const previousNavigator = Object.getOwnPropertyDescriptor(global, 'navigator')
+          Object.defineProperty(global, 'navigator', { value: { userAgent: 'test-user-agent' }, configurable: true })
           global.document = {
             title: 'Target page',
             readyState: 'complete',
+            scripts: detectionUrl ? [{ src: detectionUrl }] : [],
             querySelector: (selector) =>
               selector === '[name="cf-turnstile-response"]' && emptyResponseCount === 0
                 ? { value: 'token' }
@@ -160,6 +186,8 @@ function createIuamPage({
           } finally {
             global.document = previousDocument
             global.location = previousLocation
+            if (previousNavigator) Object.defineProperty(global, 'navigator', previousNavigator)
+            else delete global.navigator
           }
         }
         const cleared =
@@ -167,7 +195,9 @@ function createIuamPage({
             Math.min(challengeCheckIndex, challengeClearedResults.length - 1)
           ]
         challengeCheckIndex += 1
-        return cleared
+        return { sameOrigin: true, ready: true,
+          challenged: !cleared || emptyResponseCount > 0,
+          detectors: detection ? [detection.kind] : [], userAgent: 'test-user-agent' }
       }
       return 'test-user-agent'
     },
@@ -190,10 +220,7 @@ test('IUAM reads the latest browser cookie when it changes during capture', asyn
   const result = await solveIuam(
     { domain: 'https://example.com', timeoutMs: 5000 },
     createIuamPage({
-      strictClearance: 'final-clearance',
       cookieValues: [
-        'initial-clearance',
-        'initial-clearance',
         'random-transition-value',
         'final-clearance',
       ],
@@ -203,37 +230,34 @@ test('IUAM reads the latest browser cookie when it changes during capture', asyn
   assert.equal(result.cf_clearance, 'final-clearance')
   assert.notEqual(result.cf_clearance, 'random-transition-value')
   assert.equal(result.user_agent, 'test-user-agent')
-  assert.equal(result._meta.clearanceSource, 'updated_browser_cookie')
+  assert.equal(result._meta.clearanceSource, 'browser_cookie')
 })
 
-test('IUAM accepts an updated browser cookie independently of response content type', async () => {
+test('IUAM accepts a completed Precursor POST with a non-JSON response', async () => {
   const result = await solveIuam(
-    { domain: 'https://example.com', timeoutMs: 5000 },
+    { domain: 'https://example.com', timeoutMs: 1000 },
     createIuamPage({
-      strictClearance: 'final-clearance',
-      cookieValues: ['initial-clearance', 'initial-clearance', 'final-clearance'],
-      responseContentType: 'text/plain;charset=UTF-8',
-      challengeClearedResults: [true, true],
+      cookieValues: ['page-clearance'],
+      detection: { kind: 'precursor', cookie: 'page-clearance', contentType: 'text/plain' },
+      executeChallengeCheck: true,
     })
   )
-
-  assert.equal(result.cf_clearance, 'final-clearance')
-  assert.equal(result._meta.clearanceSource, 'updated_browser_cookie')
+  assert.equal(result.cf_clearance, 'page-clearance')
+  assert.equal(result._meta.clearanceSource, 'browser_cookie')
+  assert.equal(result._meta.detectionCompleted, true)
 })
 
 test('IUAM accepts a populated Turnstile response left on the target page', async () => {
   const result = await solveIuam(
     { domain: 'https://example.com', timeoutMs: 5000 },
     createIuamPage({
-      strictClearance: 'final-clearance',
-      cookieValues: ['initial-clearance', 'initial-clearance', 'final-clearance'],
-      responseContentType: 'text/plain;charset=UTF-8',
+      cookieValues: ['final-clearance'],
       executeChallengeCheck: true,
     })
   )
 
   assert.equal(result.cf_clearance, 'final-clearance')
-  assert.equal(result._meta.clearanceSource, 'updated_browser_cookie')
+  assert.equal(result._meta.clearanceSource, 'browser_cookie')
 })
 
 test('IUAM keeps waiting when any Turnstile response input is empty', async () => {
@@ -241,94 +265,103 @@ test('IUAM keeps waiting when any Turnstile response input is empty', async () =
     solveIuam(
       { domain: 'https://example.com', timeoutMs: 1000 },
       createIuamPage({
-        strictClearance: 'transition-clearance',
         cookieValues: ['transition-clearance'],
-        responseContentType: 'text/plain',
         executeChallengeCheck: true,
         emptyResponseCount: 1,
       })
     ),
-    (error) => error.code === 504 && error.detail?.phase === 'iuam_wait_clearance'
+    (error) => error.code === 504 && error.detail?.phase === 'iuam_wait_challenge'
   )
 })
 
-test('IUAM ignores a non-JSON challenge cookie while the challenge page remains', async () => {
+test('IUAM rejects a cookie while the challenge page remains', async () => {
   await assert.rejects(
     solveIuam(
       { domain: 'https://example.com', timeoutMs: 30 },
       createIuamPage({
-        strictClearance: 'random-transition-value',
         cookieValues: ['random-transition-value'],
-        responseContentType: 'text/plain',
         challengeClearedResults: [false],
       })
     ),
     (error) =>
       error.code === 504 &&
-      error.detail?.phase === 'iuam_wait_clearance'
+      error.detail?.phase === 'iuam_wait_challenge'
   )
 })
 
-test('IUAM rejects a non-JSON candidate when the challenge reappears', async () => {
+test('IUAM rejects a cookie when the challenge reappears', async () => {
   await assert.rejects(
     solveIuam(
       { domain: 'https://example.com', timeoutMs: 3000 },
       createIuamPage({
-        strictClearance: 'transition-clearance',
         cookieValues: ['transition-clearance'],
-        responseContentType: 'text/plain',
         challengeClearedResults: [true, false],
       })
     ),
-    (error) => error.code === 504 && error.detail?.phase === 'iuam_wait_clearance'
+    (error) => error.code === 504 && error.detail?.phase === 'iuam_wait_challenge'
   )
 })
 
-test('IUAM rejects a non-JSON candidate from a mitigated main document', async () => {
+test('IUAM rejects a cookie from a mitigated main document', async () => {
   await assert.rejects(
     solveIuam(
       { domain: 'https://example.com', timeoutMs: 2500 },
       createIuamPage({
-        strictClearance: 'transition-clearance',
         cookieValues: ['transition-clearance'],
-        responseContentType: 'text/plain',
         challengeClearedResults: [true],
         cfMitigated: 'challenge',
       })
     ),
-    (error) => error.code === 504 && error.detail?.phase === 'iuam_wait_clearance'
+    (error) => error.code === 504 && error.detail?.phase === 'iuam_wait_challenge'
   )
 })
 
-test('IUAM waits for a cookie update after capturing the initial snapshot', async () => {
+test('IUAM accepts a completed JSD POST after the browser applies its cookie', async () => {
   const result = await solveIuam(
     { domain: 'https://example.com', timeoutMs: 5000 },
     createIuamPage({
-      strictClearance: 'old-clearance',
-      followupClearance: 'new-clearance',
-      cookieValues: ['old-clearance', 'old-clearance', 'new-clearance'],
-      responseContentType: 'text/plain',
-      challengeClearedResults: [true, true, true],
+      cookieValues: ['jsd-clearance'],
+      detection: { kind: 'jsd', cookie: 'jsd-clearance' },
     })
   )
 
-  assert.equal(result.cf_clearance, 'new-clearance')
-  assert.equal(result._meta.clearanceSource, 'updated_browser_cookie')
+  assert.equal(result.cf_clearance, 'jsd-clearance')
+  assert.equal(result._meta.clearanceSource, 'browser_cookie')
+  assert.equal(result._meta.detectionCompleted, true)
 })
 
-test('IUAM returns the browser snapshot despite a different response candidate', async () => {
-  const result = await solveIuam(
-    { domain: 'https://example.com', timeoutMs: 5000 },
-    createIuamPage({
-      strictClearance: 'strict-clearance',
-      followupClearance: 'new-transition-clearance',
-      cookieValues: ['unmatched', 'unmatched', 'strict-clearance'],
-      challengeClearedResults: [true],
-    })
-  )
-
-  assert.equal(result.cf_clearance, 'strict-clearance')
-  assert.equal(result._meta.clearanceSource, 'updated_browser_cookie')
+test('IUAM waits when detection is unfinished, failed, or its cookie is not applied', async () => {
+  for (const { detection, cookieValues, reason } of [
+    {
+      detection: { kind: 'precursor', scriptOnly: true },
+      cookieValues: ['old-clearance'], reason: 'result_pending',
+    },
+    {
+      detection: { kind: 'precursor', cookie: 'new-clearance', failed: true },
+      cookieValues: ['new-clearance'], reason: 'request_failed',
+    },
+    {
+      detection: { kind: 'precursor', cookie: 'new-clearance', unfinished: true },
+      cookieValues: ['new-clearance'], reason: 'request_pending',
+    },
+    {
+      detection: { kind: 'precursor', cookie: 'old-clearance', followupScript: true },
+      cookieValues: ['old-clearance'], reason: 'result_pending',
+    },
+    {
+      detection: { kind: 'precursor', cookie: 'new-clearance' },
+      cookieValues: ['old-clearance'], reason: 'cookie_not_applied',
+    },
+  ]) {
+    await assert.rejects(
+      solveIuam(
+        { domain: 'https://example.com', timeoutMs: 150 },
+        createIuamPage({ detection, cookieValues })
+      ),
+      (error) => error.code === 504 && error.detail?.phase === 'iuam_wait_detection' &&
+        error.detail.reason === reason
+    )
+  }
 })
 
 function createTurnstilePage({ resultCount = 1, candidate = null, clickError = null } = {}) {

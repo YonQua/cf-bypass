@@ -5,173 +5,217 @@ const { clickIuamTurnstileOnce } = require('../utils/turnstile/clicker')
 
 const POLL_INTERVAL_MS = 100
 const CLICK_INTERVAL_MS = 2000
+const DETECTION_PATH = '^/cdn-cgi/challenge-platform/(?:h/[^/]+/)?(?:scripts/)?(precursor|jsd)/'
 const CHALLENGE_TITLES = ['just a moment', 'attention required', '请稍候']
 const CHALLENGE_SELECTORS = [
-  '#cf-challenge-running',
-  '#cf-please-wait',
-  '#challenge-spinner',
-  '#turnstile-wrapper',
-  '[name="cf-turnstile-response"]',
+  '#cf-challenge-running', '#cf-please-wait', '#challenge-spinner', '#turnstile-wrapper',
 ]
 
-function extractMainDocument(response, page) {
+function detectionKind(value, origin) {
   try {
-    const request = response.request()
-    if (!request?.isNavigationRequest?.()) return null
-    if (request.frame?.() !== page.mainFrame?.()) return null
-
-    const headers = response.headers?.() || {}
-    return {
-      url: response.url(),
-      status: response.status?.() || 0,
-      cfMitigated: headers['cf-mitigated'] || null,
-    }
+    const url = new URL(value)
+    return url.origin === origin ? url.pathname.match(DETECTION_PATH)?.[1] : null
   } catch {
     return null
   }
 }
 
-async function challengeCleared(page, expectedOrigin, mainDocument) {
-  if (!mainDocument) return false
-  if (
-    mainDocument.cfMitigated === 'challenge' ||
-    mainDocument.status < 200 ||
-    mainDocument.status >= 400
-  ) {
-    return false
-  }
-  try {
-    if (new URL(mainDocument.url).origin !== expectedOrigin) return false
-  } catch {
-    return false
-  }
+function issuedCookie(response) {
+  if (response.status() < 200 || response.status() >= 300) return null
+  const header = response.headers()['set-cookie']
+  const raw = Array.isArray(header) ? header.join('\n') : String(header || '')
+  return raw.match(/(?:^|[\n,]\s*)cf_clearance=([^;\s]+)/)?.[1] || null
+}
 
-  try {
-    return await page.evaluate(
-      ({ origin, titles, selectors }) => {
-        const title = document.title.trim().toLowerCase()
-        const hasActiveChallengeSelector = selectors.some((selector) => {
-          if (selector === '[name="cf-turnstile-response"]') {
-            // Cloudflare keeps populated response inputs after success; only
-            // an empty response input still represents an active challenge.
-            return [...document.querySelectorAll(selector)].some(
-              (element) => !element.value?.trim()
-            )
-          }
-          return Boolean(document.querySelector(selector))
-        })
-        return (
-          location.origin === origin &&
-          document.readyState !== 'loading' &&
-          !(
-            titles.some((value) => title.includes(value)) ||
-            hasActiveChallengeSelector
-          )
-        )
-      },
-      { origin: expectedOrigin, titles: CHALLENGE_TITLES, selectors: CHALLENGE_SELECTORS }
-    )
-  } catch {
-    return false
+function observePage(page, origin) {
+  let current
+  const onRequest = (request) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+      current = {
+        request,
+        response: null,
+        domReady: false,
+        detectors: new Set(),
+        pending: new Set(),
+        post: null,
+        candidate: null,
+        revision: 0,
+      }
+    }
+    const kind = detectionKind(request.url(), origin)
+    if (!current || !kind ||
+      (request.method() !== 'POST' && request.resourceType() !== 'script')) return
+    current.detectors.add(kind)
+    current.pending.add(request)
+    current.revision += 1
+    current.candidate = null
+    if (request.method() === 'POST') current.post = request
   }
+  const onResponse = (response) => {
+    const request = response.request()
+    if (request === current?.request) current.response = response
+    if (!current?.pending.has(request) || request !== current.post) return
+    // 响应只提供候选；新检测会使它失效，请求结束不能重新恢复旧候选。
+    const cookie = issuedCookie(response)
+    current.candidate = cookie ? { cookie } : { reason: 'response_without_clearance' }
+    current.revision += 1
+  }
+  const finish = (request, failed) => {
+    if (!current?.pending.delete(request)) return
+    current.revision += 1
+    if (failed && (request === current.post || !current.candidate?.cookie)) {
+      current.candidate = { reason: 'request_failed' }
+    }
+  }
+  const onFinished = (request) => finish(request, false)
+  const onFailed = (request) => finish(request, true)
+  const onDomReady = () => { if (current) current.domReady = true }
+  const listeners = {
+    request: onRequest, response: onResponse, requestfinished: onFinished,
+    requestfailed: onFailed, domcontentloaded: onDomReady,
+  }
+  for (const [event, handler] of Object.entries(listeners)) page.on(event, handler)
+  return {
+    current: () => current,
+    close: () => {
+      for (const [event, handler] of Object.entries(listeners)) page.off(event, handler)
+    },
+  }
+}
+
+async function readPageState(page, origin) {
+  return page.evaluate(({ origin, titles, selectors, detectionPath }) => {
+    const title = document.title.trim().toLowerCase()
+    const challenged = titles.some((value) => title.includes(value)) ||
+      selectors.some((selector) => document.querySelector(selector)) ||
+      [...document.querySelectorAll('[name="cf-turnstile-response"]')].some(
+        (element) => !element.value?.trim()
+      )
+    const pattern = new RegExp(detectionPath)
+    const detectors = [...document.scripts].flatMap((script) => {
+      if (!script.src) return []
+      const url = new URL(script.src, location.href)
+      const kind = url.origin === origin && url.pathname.match(pattern)?.[1]
+      return kind ? [kind] : []
+    })
+    return {
+      sameOrigin: location.origin === origin,
+      ready: document.readyState !== 'loading', challenged, detectors,
+      userAgent: navigator.userAgent,
+    }
+  }, { origin, titles: CHALLENGE_TITLES, selectors: CHALLENGE_SELECTORS, detectionPath: DETECTION_PATH })
 }
 
 async function cloudflare(data, page) {
   if (!data.domain) throw createError('Missing domain parameter', 400)
-
-  const startedAtMs = Date.now()
+  const startedAt = Date.now()
   const timeoutMs = Number(data.timeoutMs) || data.defaultTimeoutMs || 60000
-  const deadline = startedAtMs + timeoutMs
-  const expectedOrigin = new URL(data.domain).origin
-  let initialClearance = null
-  let mainDocument = null
-  let nextClickAtMs = 0
+  const deadline = startedAt + timeoutMs
+  const origin = new URL(data.domain).origin
+  const observer = observePage(page, origin)
+  let progress
+  let nextClickAt = 0
   let interactionAttempted = false
 
-  const onRequest = (request) => {
-    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
-      mainDocument = null
-    }
-  }
-  const onResponse = (response) => {
-    const document = extractMainDocument(response, page)
-    if (document) mainDocument = document
+  function waiting(phase, reason, extra = {}) {
+    progress = { phase, reason, ...extra }
+    data.onProgress?.(progress)
+    return null
   }
 
   async function captureClearance() {
-    const document = mainDocument
-    if (!(await challengeCleared(page, expectedOrigin, document))) return null
-
-    const clearance = await readClearanceCookie(page, data.domain)
-    if (!clearance || (initialClearance && clearance === initialClearance)) return null
-    const userAgent = await page.evaluate(() => navigator.userAgent)
-    if (!(await challengeCleared(page, expectedOrigin, document))) return null
-    const current = await readClearanceCookie(page, data.domain)
-    if (Date.now() >= deadline || document !== mainDocument || current !== clearance) {
-      return null
+    const navigation = observer.current()
+    const response = navigation?.response
+    if (!response) return waiting('iuam_wait_page', 'navigation_pending')
+    const documentStatus = response.status()
+    if (response.headers()['cf-mitigated'] === 'challenge') {
+      return waiting('iuam_wait_challenge', 'challenge_response', { documentStatus })
     }
-    return { cf_clearance: current, user_agent: userAgent }
+    if (documentStatus >= 400) {
+      return waiting('iuam_target_blocked', 'target_http_error', { documentStatus })
+    }
+    if (documentStatus < 200 || !navigation.domReady) {
+      return waiting('iuam_wait_page', 'document_loading', { documentStatus })
+    }
+    const state = await readPageState(page, origin).catch(() => null)
+    if (!state || navigation !== observer.current() || !state.ready) {
+      return waiting('iuam_wait_page', 'document_changed')
+    }
+    if (!state.sameOrigin) return waiting('iuam_wait_page', 'unexpected_origin', { documentStatus })
+    if (state.challenged) return waiting('iuam_wait_challenge', 'challenge_page', { documentStatus })
+    for (const kind of state.detectors) navigation.detectors.add(kind)
+    if (navigation.detectors.size &&
+      (navigation.pending.size || !navigation.candidate?.cookie)) {
+      return waiting('iuam_wait_detection', navigation.candidate?.reason ||
+        (navigation.pending.size ? 'request_pending' : 'result_pending'), {
+        documentStatus, detection: [...navigation.detectors].join(','),
+      })
+    }
+    const revision = navigation.revision
+    const clearance = await readClearanceCookie(page, data.domain)
+    if (!clearance) return waiting('iuam_wait_clearance', 'cookie_not_issued', { documentStatus })
+    if (navigation.detectors.size && clearance !== navigation.candidate?.cookie) {
+      return waiting('iuam_wait_detection', 'cookie_not_applied', { documentStatus })
+    }
+    const verified = await readPageState(page, origin).catch(() => null)
+    const current = await readClearanceCookie(page, data.domain)
+    if (!verified || !verified.sameOrigin || !verified.ready || verified.challenged ||
+      verified.detectors.some((kind) => !navigation.detectors.has(kind)) ||
+      navigation !== observer.current() || navigation.revision !== revision ||
+      clearance !== current || Date.now() >= deadline) {
+      return waiting('iuam_verify_clearance', 'snapshot_changed')
+    }
+    return {
+      cf_clearance: current,
+      user_agent: verified.userAgent,
+      detectionCompleted: navigation.detectors.size > 0,
+    }
   }
 
-  page.on('request', onRequest)
-  page.on('response', onResponse)
-
   try {
+    waiting('iuam_wait_page', 'navigation_pending')
     await applyProxyAuthentication(page, data.proxy)
     await page.goto(data.domain, {
       waitUntil: 'domcontentloaded',
       timeout: Math.max(1, deadline - Date.now()),
     })
-
     while (Date.now() < deadline) {
       const snapshot = await captureClearance()
       if (snapshot) {
-        if (!initialClearance) {
-          // 页面通过后的首个 Cookie 可能仍是过渡值，当前完成条件要求再次更新。
-          initialClearance = snapshot.cf_clearance
-          data.logger?.debug?.('event=iuam_clearance_update_waiting', {
-            request_id: data.requestId,
-            mode: 'iuam',
-          })
-        } else {
-          data.logger?.info?.('event=iuam_clearance_selected', {
-            request_id: data.requestId,
-            mode: 'iuam',
-            source: 'updated_browser_cookie',
-            clearance_length: snapshot.cf_clearance.length,
-            elapsed_ms: Date.now() - startedAtMs,
-          })
-          return {
-            ...snapshot,
-            elapsed_time: (Date.now() - startedAtMs) / 1000,
-            _meta: {
-              enteredClickMode: interactionAttempted,
-              clearanceSource: 'updated_browser_cookie',
-            },
-          }
+        const { detectionCompleted, ...result } = snapshot
+        data.logger?.info?.('event=iuam_clearance_selected', {
+          request_id: data.requestId,
+          mode: 'iuam',
+          source: 'browser_cookie',
+          detection_completed: detectionCompleted,
+          clearance_length: result.cf_clearance.length,
+          elapsed_ms: Date.now() - startedAt,
+        })
+        return {
+          ...result,
+          elapsed_time: (Date.now() - startedAt) / 1000,
+          _meta: {
+            enteredClickMode: interactionAttempted,
+            clearanceSource: 'browser_cookie',
+            detectionCompleted,
+          },
         }
       }
-
-      const nowMs = Date.now()
-      // 交互只推进挑战，不参与 clearance 判定。
-      if (!initialClearance && nowMs >= nextClickAtMs) {
+      if (progress.phase === 'iuam_wait_challenge' && Date.now() >= nextClickAt) {
         const clicked = await clickIuamTurnstileOnce(page).catch(() => false)
         interactionAttempted = interactionAttempted || clicked
-        nextClickAtMs = nowMs + CLICK_INTERVAL_MS
+        nextClickAt = Date.now() + CLICK_INTERVAL_MS
       }
-
       await sleep(Math.min(POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())))
     }
-
     throw createError(`IUAM timeout after ${timeoutMs}ms`, 504, {
       timeoutMs,
       label: 'IUAM',
-      phase: initialClearance ? 'iuam_wait_clearance_update' : 'iuam_wait_clearance',
+      ...progress,
       enteredClickMode: interactionAttempted,
     })
   } finally {
-    page.off('request', onRequest)
-    page.off('response', onResponse)
+    observer.close()
   }
 }
 

@@ -77,8 +77,8 @@ docker compose up --build -d
 浏览器运行时说明：
 
 - 所有模式统一使用 `cloakbrowser/puppeteer`
-- IUAM 从浏览器上下文 Cookie 存储读取目标域名的 `cf_clearance`，页面通过后继续读取，Cookie 更新后自动返回并关闭浏览器；点击只推进挑战。
-- 当前 `cloakbrowser` 依赖锁定为 `0.3.21`；Linux ARM64 镜像构建时使用 Chromium `145.0.7632.159.7`，macOS ARM64 本地 binary 为 `145.0.7632.109.2`
+- IUAM 自动等待页面实际的挑战流程完成，统一从浏览器上下文读取目标域名的 `cf_clearance`，返回后关闭浏览器；点击只推进挑战。
+- 当前 `cloakbrowser` 依赖锁定为 `0.5.12`，要求 Node.js >= 20；未配置授权密钥时，包内默认 Linux ARM64 binary 为 Chromium `146.0.7680.177.3`，macOS ARM64 为 `145.0.7632.109.2`。实际运行版本以 `npx cloakbrowser info` 为准
 - Docker Compose 使用 `xvfb-run -a npm start` 启动 headful CloakBrowser，以贴近真实桌面浏览器环境
 - 如需后续切换到其他 CloakBrowser binary，可通过 `CLOAKBROWSER_BINARY_PATH=/app/.cloakbrowser/chromium-<version>/chrome` 显式指定；该路径必须在容器内真实存在
 - CloakBrowser binary 受其独立 Binary License 约束；内部授权测试可用，若作为第三方浏览器服务提供需先确认 OEM/SaaS 授权
@@ -87,16 +87,21 @@ IUAM clearance 自动获取要求：
 
 - 从当前浏览器上下文存储读取 Cookie，核对目标域名、路径及分区，返回原始值和同一浏览器的 UA。
 - 目标主文档必须同源、状态正常、没有 `cf-mitigated: challenge`，页面不再显示挑战。
-- 初始 Cookie 获取后继续读取浏览器存储；观察到值更新后重新检查页面通过状态，读取对应 UA，再确认页面与 Cookie 未变化并自动返回、关闭浏览器。无需手动关闭窗口或按回车。
-- 当前完成条件要求初始 Cookie 后至少一次更新；不发生更新的网站会在总预算耗尽时返回 504，不能视作已验证兼容。
-- 总超时返回 504。返回的是当前浏览器快照，不保证后续 Cookie 不再轮换，也不保证其他接口或其他客户端可用。
+- 目标文档解析完成（DOMContentLoaded）、挑战解除后，若观察到 Precursor/JSD 检测，则等待检测 POST 完整结束并确认浏览器已应用对应 Cookie。普通资源不参与检测判断，脚本下载完成也不等于检测完成。
+- 所有站点使用同一个读取入口，无需调用方选择模式；不按域名或响应是否 JSON 分类，也不要求 Cookie 必须再次变化。
+- 已实测 linux.do 正常页面加载 `/cdn-cgi/challenge-platform/scripts/precursor/main.js`，随后异步 POST 更新 Cookie；Shodan 本次观察没有后续检测。此结论描述当前行为，不是永久域名规则。
+- 获取匹配的 Cookie 后读取对应 UA，重新检查页面通过状态，再确认页面与 Cookie 未变化并自动返回、关闭浏览器。无需手动关闭窗口或按回车。
 - 此路径不写入缓存，避免复用先前的 Cookie。
+- 总预算耗尽时仍返回 504，`detail.phase` / `detail.reason` 保留具体原因：`iuam_wait_clearance` / `cookie_not_issued` 表示未观察到签发，`iuam_wait_challenge` 表示仍在挑战，`iuam_target_blocked` 表示目标 HTTP 错误，`iuam_wait_detection` 表示已识别检测未完成或失败。页面正常但没有 Cookie 不算求解成功。
+- 当前自动等待覆盖已观察的 Precursor/JSD 流程；未知检测不能仅凭路径相似认定已兼容。返回的是浏览器当时的快照，不保证 Cookie 不再轮换或其他接口、客户端可用。
+
+Turnstile 的结果是 `token`，不是 `cf_clearance`。当前接口在目标 URL 上使用合成 widget 页面；返回 Token 只说明该流程产生了 Token，不代表原站业务请求已通过服务端验证，也不保证签发 pre-clearance Cookie。
 
 Docker/CloakBrowser 排障要点：
 
 - `browserPlatform` 是请求级覆盖项，会优先于 `BROWSER_PLATFORM`；测试脚本若显式传入平台，会覆盖 Compose 默认值。
 - Docker 的 binary 运行平台仍是 `linux-arm64`，即使 `browserPlatform` 设置为 `macos`；两者分别表示运行环境和浏览器指纹平台。
-- 当前依赖版本用于锁定 Linux ARM64 Chromium `145.0.7632.159.7`；升级 `cloakbrowser` 可能改变各平台 binary 版本，重建镜像后应执行 `npx cloakbrowser info` 核对。
+- 当前包内默认 Linux ARM64 Chromium 为 `146.0.7680.177.3`；升级 `cloakbrowser` 或配置授权密钥可能改变各平台 binary 版本，重建镜像后应执行 `npx cloakbrowser info` 核对。
 - Linux 容器没有完整 Windows 字体集，`windows` 指纹可能导致 clearance 获取失败或后续 403，不建议作为默认平台。
 - `CLOAKBROWSER_TIMEZONE` / `CLOAKBROWSER_LOCALE` 应与代理出口所在地匹配；不确定时保持为空，不要固定套用纽约时区。
 - 若本机 `uv run cf_test.py` 因 `/Users/leishao/.cache/uv` 权限失败，可使用 `python3 cf_test.py`，或为 uv 指定可写缓存目录。

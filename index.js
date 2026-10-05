@@ -284,6 +284,7 @@ app.post('/cloudflare', async (req, res) => {
   let result
   let browser, page
   let browserProvider = null
+  let latestIuamProgress = null
 
   try {
     stage = 'browser_connect'
@@ -314,6 +315,14 @@ app.post('/cloudflare', async (req, res) => {
           timeoutMs: solverTimeout,
           logger,
           requestId,
+          ...(data.mode === 'iuam'
+            ? {
+                onProgress: (progress) => {
+                  const { phase, reason, documentStatus, detection } = progress
+                  latestIuamProgress = { phase, reason, documentStatus, detection }
+                },
+              }
+            : {}),
         },
         page
       ),
@@ -326,6 +335,15 @@ app.post('/cloudflare', async (req, res) => {
     )
   } catch (err) {
     const normalized = normalizeError(err)
+    if (
+      data.mode === 'iuam' &&
+      normalized.code === 504 &&
+      normalized.detail?.phase === 'iuam_execute' &&
+      normalized.detail?.label === 'request' &&
+      latestIuamProgress
+    ) {
+      normalized.detail = { ...normalized.detail, ...latestIuamProgress }
+    }
     failurePhase = normalized.detail?.phase || stage
     interaction = normalized.detail?.interaction || null
     logHandlerFailure({
