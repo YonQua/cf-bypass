@@ -133,9 +133,9 @@ Docker/CloakBrowser 排障要点：
 Turnstile 超时排障说明：
 
 - 默认会在失败日志与错误 detail 中记录 `apiScriptRequested`、`apiScriptLoaded`、`apiScriptStatus`、`turnstileStatusCounts`、`turnstileNonOkResponses`、`turnstileIframeCount`、`consoleErrorCount`、`currentUrl`、`pageTitle`
-- Turnstile 会循环检测并点击 `cf-turnstile-response` 父节点、Turnstile iframe、widget 容器及典型 300px challenge 区域，替代旧版外部 wrapper 的后台点击行为
+- Turnstile 会逐个探测 challenge target 的 checkbox，并只点击与已就绪 target 对应的 iframe；IUAM 保留响应元素父容器优先路径，不可点击时再检查 iframe
 - token 读取会同时检查自定义 `cf-response` 与 Cloudflare 自带的 `cf-turnstile-response`
-- 当请求体设置 `"debugArtifacts": true` 时，失败会写入 `summary.json`、`html-summary.txt` 与 `screenshot.png`
+- 当请求体设置 `"debugArtifacts": true` 时，失败会在预留诊断预算内尝试写入 `summary.json`、`html-summary.txt` 与 `screenshot.png`；页面采集或截图超时可能只留下部分工件
 - Docker 容器内默认工件目录是 `/tmp/cf-bypass-artifacts`，可通过 `DEBUG_ARTIFACT_DIR` 覆盖
 - `turnstile_wait_token` 表示页面和浏览器已运行，但在超时时间内没有收到 Turnstile callback token
 

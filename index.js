@@ -152,6 +152,13 @@ function logHandlerFailure(options) {
     interaction,
     proxyEnabled,
   })
+  Object.assign(meta, {
+    failure_reason: normalized.detail?.reason,
+    document_status: normalized.detail?.documentStatus,
+    current_url: buildLogTarget(normalized.detail?.currentUrl),
+    page_title: normalized.detail?.pageTitle,
+    challenge_evidence: normalized.detail?.challengeEvidence,
+  })
 
   if (normalized.code >= 500) {
     logger.error('event=handler_error', {
@@ -313,13 +320,13 @@ app.post('/cloudflare', async (req, res) => {
         {
           ...data,
           timeoutMs: solverTimeout,
+          requestDeadline,
           logger,
           requestId,
           ...(data.mode === 'iuam'
             ? {
                 onProgress: (progress) => {
-                  const { phase, reason, documentStatus, detection } = progress
-                  latestIuamProgress = { phase, reason, documentStatus, detection }
+                  latestIuamProgress = progress
                 },
               }
             : {}),

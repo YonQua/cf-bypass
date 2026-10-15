@@ -1,5 +1,5 @@
 const { applyProxyAuthentication, applyRequestInterception } = require('../utils/browser')
-const { withTimeout } = require('../utils/async')
+const { runUntil } = require('../utils/async')
 const { createError, isTimeoutError } = require('../utils/errors')
 const { createTurnstileDiagnostics } = require('../utils/turnstile/diagnostics')
 const { waitForTurnstile } = require('../utils/turnstile/solver')
@@ -99,85 +99,63 @@ async function installSyntheticTurnstilePage(page, { domain, htmlContent, logger
   })
 }
 
-function hasDiagnosticDetail(error) {
-  return (
-    error?.detail?.label === 'Turnstile' &&
-    Object.prototype.hasOwnProperty.call(error.detail, 'apiScriptRequested')
-  )
-}
-
 async function turnstile(
-  { domain, proxy, siteKey, timeoutMs, defaultTimeoutMs, logger, requestId, debugArtifacts },
+  { domain, proxy, siteKey, timeoutMs, requestDeadline, defaultTimeoutMs, logger, requestId, debugArtifacts },
   page
 ) {
   if (!domain) throw createError('Missing domain parameter', 400)
   if (!siteKey) throw createError('Missing siteKey parameter', 400)
 
   const timeout = Number(timeoutMs) || defaultTimeoutMs || 60000
-  const tokenTimeout = Math.max(1000, timeout - DIAGNOSTIC_GRACE_MS)
   const startedAt = Date.now()
+  const deadline = requestDeadline || startedAt + timeout
+  const diagnosticBudget = Math.min(DIAGNOSTIC_GRACE_MS, Math.max(1, Math.floor(timeout / 4)))
+  const solveDeadline = deadline - diagnosticBudget
   const diagnostics = createTurnstileDiagnostics({ page, requestId, logger, debugArtifacts })
+  let phase = 'turnstile_page_load'
 
-  async function throwWithDiagnostics(error, phase, options = {}) {
-    const detail = await diagnostics.captureFailure({
-      timeoutMs: timeout,
-      phase,
-      reason: error.message,
-    })
-    const code = options.code || Number(error?.code) || (isTimeoutError(error) ? 504 : 500)
-    const message = options.message || error.message || 'Turnstile failed'
-    throw createError(message, code, detail)
-  }
-
-  const workPromise = (async () => {
-    await applyProxyAuthentication(page, proxy)
-
-    await installSyntheticTurnstilePage(page, {
+  try {
+    await runUntil(solveDeadline, phase, () => applyProxyAuthentication(page, proxy))
+    await runUntil(solveDeadline, phase, () => installSyntheticTurnstilePage(page, {
       domain,
       htmlContent: buildSyntheticHtml(siteKey),
       logger,
       requestId,
-    })
+    }))
     diagnostics.attach()
 
-    try {
-      await page.goto(domain, { waitUntil: 'domcontentloaded', timeout })
-    } catch (error) {
-      await throwWithDiagnostics(error, 'turnstile_page_load')
-    }
+    await runUntil(solveDeadline, phase, () => page.goto(domain, {
+      waitUntil: 'domcontentloaded',
+      timeout: Math.max(1, solveDeadline - Date.now()),
+    }))
 
+    phase = 'turnstile_wait_token'
     const solveResult = await waitForTurnstile(page, {
-      timeoutMs: tokenTimeout,
+      deadline: solveDeadline,
       diagnostics,
       readValue: () => readTurnstileToken(page),
     })
-
-    const token = solveResult.value
-    if (!token) {
-      await throwWithDiagnostics(
-        new Error(`Turnstile timeout after ${timeout}ms`),
-        'turnstile_wait_token',
-        { code: 504 }
-      )
+    if (!solveResult.value) {
+      throw createError(`Turnstile timeout after ${timeout}ms`, 504, { phase })
     }
 
-    const userAgent = await page.evaluate(() => navigator.userAgent).catch(() => null)
+    const userAgent = await runUntil(solveDeadline, phase, () => page.evaluate(() => navigator.userAgent)).catch(() => null)
     return {
-      token,
+      token: solveResult.value,
       user_agent: userAgent,
       elapsed_time: (Date.now() - startedAt) / 1000,
       _meta: { interaction: solveResult.interaction },
     }
-  })()
-
-  try {
-    return await withTimeout(workPromise, timeout + DIAGNOSTIC_GRACE_MS, 'Turnstile', {
-      phase: 'turnstile_execute',
-      message: `Turnstile timeout after ${timeout}ms`,
-    })
   } catch (error) {
-    if (hasDiagnosticDetail(error)) throw error
-    await throwWithDiagnostics(error, error?.detail?.phase || 'turnstile_execute')
+    // Leave time for the caller to receive diagnostics before its request timer closes the browser.
+    const detail = await diagnostics.captureFailure({
+      timeoutMs: timeout,
+      deadline: Math.min(Date.now() + diagnosticBudget, deadline - Math.min(50, diagnosticBudget / 2)),
+      phase: error?.detail?.phase || phase,
+      reason: error.message,
+    })
+    const code = Number(error?.code) || (isTimeoutError(error) ? 504 : 500)
+    throw createError(error.message || 'Turnstile failed', code, detail)
   }
 }
 

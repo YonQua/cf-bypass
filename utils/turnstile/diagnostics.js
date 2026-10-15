@@ -1,6 +1,6 @@
 const fs = require('fs')
 const path = require('path')
-const { withTimeout } = require('../async')
+const { runUntil } = require('../async')
 
 const STATE_TIMEOUT_MS = 1000
 const ARTIFACT_ROOT = process.env.DEBUG_ARTIFACT_DIR || '/tmp/cf-bypass-artifacts'
@@ -63,12 +63,7 @@ function createState() {
     pageErrors: [],
     failedRequests: [],
     turnstileRequests: [],
-    solverAttempts: 0,
-    solverClicks: 0,
-    solverExecutes: 0,
-    solverLastState: null,
-    solverLastCandidates: [],
-    solverLastError: null,
+    interaction: { clickCount: 0, lastState: null, lastError: null },
   }
 }
 
@@ -98,10 +93,10 @@ function summarizeTurnstileResponses(turnstileRequests) {
   }
 }
 
-async function capturePageState(page) {
+async function capturePageState(page, deadline) {
   try {
-    return await withTimeout(
-      page.evaluate((limits) => {
+    return await runUntil(deadline, 'turnstile_state_capture',
+      () => page.evaluate((limits) => {
         const tokenInput = document.querySelector('[name="cf-response"]')
         const tokenValue = typeof tokenInput?.value === 'string' ? tokenInput.value.trim() : ''
         const turnstileInput = document.querySelector('[name="cf-turnstile-response"]')
@@ -149,9 +144,7 @@ async function capturePageState(page) {
         maxBodyTextLength: MAX_BODY_TEXT_LENGTH,
         maxHtmlSampleLength: MAX_HTML_SAMPLE_LENGTH,
       }),
-      STATE_TIMEOUT_MS,
-      'Turnstile page state',
-      { phase: 'turnstile_state_capture' }
+      STATE_TIMEOUT_MS
     )
   } catch {
     return null
@@ -191,12 +184,10 @@ function buildDetail({ timeoutMs, phase, state, pageState, artifactDir }) {
     turnstileResponseInputPresent: pageState?.turnstileResponseInputPresent,
     turnstileResponseValueLength: pageState?.turnstileResponseValueLength,
     getResponseValueLength: pageState?.getResponseValueLength,
-    solverAttempts: state.solverAttempts,
-    solverClicks: state.solverClicks,
-    solverExecutes: state.solverExecutes,
-    solverLastState: state.solverLastState,
-    solverLastCandidates: state.solverLastCandidates,
-    solverLastError: state.solverLastError,
+    interaction: { ...state.interaction },
+    solverClicks: state.interaction.clickCount,
+    solverLastState: state.interaction.lastState,
+    solverLastError: state.interaction.lastError,
     ...(artifactDir ? { artifactDir } : {}),
   }
 }
@@ -270,44 +261,17 @@ function createTurnstileDiagnostics({ page, requestId, logger, debugArtifacts })
     })
   }
 
-  function recordSolverAttempt(candidates) {
-    state.solverAttempts += 1
-    state.solverLastCandidates = candidates.map((candidate) => ({
-      source: candidate.source,
-      x: Math.round(candidate.x),
-      y: Math.round(candidate.y),
-      width: Math.round(candidate.width),
-      height: Math.round(candidate.height),
-    }))
+  function recordInteraction(interaction) {
+    state.interaction = interaction
   }
 
-  function recordSolverClick() {
-    state.solverClicks += 1
-  }
-
-  function recordSolverExecute() {
-    state.solverExecutes += 1
-  }
-
-  function recordSolverState(turnstileState) {
-    state.solverLastState = turnstileState
-  }
-
-  function recordSolverError(error) {
-    state.solverLastError = error.message
-    logger?.debug?.('event=turnstile_solver_click_failed', {
-      request_id: requestId,
-      mode: 'turnstile',
-      error: error.message,
-    })
-  }
-
-  async function writeArtifacts({ reason, pageState }) {
+  async function writeArtifacts({ reason, pageState, deadline }) {
+    const write = (operation) => runUntil(deadline, 'turnstile_artifact_write', operation)
     const artifactDir = path.join(
       ARTIFACT_ROOT,
       `turnstile-${safeRequestId(requestId)}-${Date.now()}`
     )
-    await fs.promises.mkdir(artifactDir, { recursive: true })
+    await write(() => fs.promises.mkdir(artifactDir, { recursive: true }))
 
     const summary = {
       reason,
@@ -316,39 +280,39 @@ function createTurnstileDiagnostics({ page, requestId, logger, debugArtifacts })
       pageState,
     }
 
-    await fs.promises.writeFile(
+    await write(() => fs.promises.writeFile(
       path.join(artifactDir, 'summary.json'),
       JSON.stringify(summary, null, 2),
       'utf-8'
-    )
+    ))
 
     if (pageState?.htmlSample) {
-      await fs.promises.writeFile(path.join(artifactDir, 'html-summary.txt'), pageState.htmlSample, 'utf-8')
+      await write(() => fs.promises.writeFile(path.join(artifactDir, 'html-summary.txt'), pageState.htmlSample, 'utf-8'))
     }
 
     try {
-      await page.screenshot({
+      await write(() => page.screenshot({
         path: path.join(artifactDir, 'screenshot.png'),
         fullPage: true,
-      })
+      }))
     } catch (error) {
-      await fs.promises.writeFile(
+      await write(() => fs.promises.writeFile(
         path.join(artifactDir, 'screenshot-error.txt'),
         error.message,
         'utf-8'
-      )
+      ))
     }
 
     return artifactDir
   }
 
-  async function captureFailure({ timeoutMs, phase, reason }) {
+  async function captureFailure({ timeoutMs, phase, reason, deadline = Date.now() + 2000 }) {
     let artifactDir = null
-    let pageState = await capturePageState(page)
+    const pageState = await capturePageState(page, deadline)
 
     if (shouldWriteArtifacts) {
       try {
-        artifactDir = await writeArtifacts({ reason, pageState })
+        artifactDir = await writeArtifacts({ reason, pageState, deadline })
       } catch (error) {
         logger?.warn?.('event=turnstile_debug_artifact_failed', {
           request_id: requestId,
@@ -380,9 +344,9 @@ function createTurnstileDiagnostics({ page, requestId, logger, debugArtifacts })
       page_title: detail.pageTitle,
       turnstile_response_input_present: detail.turnstileResponseInputPresent,
       turnstile_response_value_length: detail.turnstileResponseValueLength,
-      solver_attempts: detail.solverAttempts,
       solver_clicks: detail.solverClicks,
-      solver_executes: detail.solverExecutes,
+      solver_last_state: detail.solverLastState,
+      solver_last_error: detail.solverLastError,
       artifact_dir: artifactDir,
     })
 
@@ -392,11 +356,7 @@ function createTurnstileDiagnostics({ page, requestId, logger, debugArtifacts })
   return {
     attach,
     captureFailure,
-    recordSolverAttempt,
-    recordSolverClick,
-    recordSolverExecute,
-    recordSolverState,
-    recordSolverError,
+    recordInteraction,
   }
 }
 

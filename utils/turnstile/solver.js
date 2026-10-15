@@ -1,32 +1,32 @@
-const { sleep } = require('../async')
+const { sleep, runUntil } = require('../async')
 const { clickTurnstileOnce } = require('./clicker')
 
 const POLL_INTERVAL_MS = 250
 const CLICK_RETRY_INTERVAL_MS = 5000
 
-async function waitForTurnstile(page, { timeoutMs, readValue, diagnostics }) {
-  const deadline = Date.now() + timeoutMs
+async function waitForTurnstile(page, { timeoutMs, deadline = Date.now() + timeoutMs, readValue, diagnostics }) {
   const interaction = { clickCount: 0, lastState: null, lastError: null }
+  diagnostics?.recordInteraction(interaction)
   let nextClickAt = 0
 
   while (Date.now() < deadline) {
-    const value = await readValue()
+    const value = await runUntil(deadline, 'turnstile_wait_token', readValue)
+    if (Date.now() >= deadline) break
     if (value) return { value, interaction }
 
     const now = Date.now()
     if (now >= nextClickAt) {
-      const attempt = await clickTurnstileOnce(page, diagnostics)
+      const attempt = await clickTurnstileOnce(page, { deadline })
       interaction.lastState = attempt.state
       interaction.lastError = attempt.error || null
-      if (attempt.clicked) interaction.clickCount += 1
-      nextClickAt = now + (attempt.clicked ? CLICK_RETRY_INTERVAL_MS : POLL_INTERVAL_MS)
+      interaction.clickCount += attempt.clickCount
+      nextClickAt = now + (attempt.clickCount > 0 ? CLICK_RETRY_INTERVAL_MS : POLL_INTERVAL_MS)
     }
 
     await sleep(Math.min(POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())))
   }
 
-  const value = await readValue()
-  return value ? { value, interaction } : { value: null, interaction }
+  return { value: null, interaction }
 }
 
 module.exports = { waitForTurnstile }

@@ -26,4 +26,17 @@ function withTimeout(promise, timeoutMs, label, options = {}) {
   })
 }
 
-module.exports = { sleep, withTimeout }
+function runUntil(deadline, phase, operation, maximumMs = Infinity) {
+  const remaining = Math.min(maximumMs, deadline - Date.now())
+  if (remaining <= 0) {
+    return Promise.reject(createError('Request deadline exceeded', 504, { phase }))
+  }
+  return withTimeout(Promise.resolve().then(() => {
+    if (Date.now() >= deadline) {
+      throw createError('Request deadline exceeded', 504, { phase })
+    }
+    return operation()
+  }), remaining, 'request', { phase })
+}
+
+module.exports = { sleep, withTimeout, runUntil }

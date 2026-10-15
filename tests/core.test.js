@@ -12,7 +12,6 @@ const { createSemaphore } = require('../utils/semaphore')
 const {
   clickIuamTurnstileOnce,
   clickTurnstileOnce,
-  probeTurnstileCheckbox,
 } = require('../utils/turnstile/clicker')
 const { waitForTurnstile } = require('../utils/turnstile/solver')
 
@@ -260,18 +259,16 @@ test('IUAM accepts a populated Turnstile response left on the target page', asyn
   assert.equal(result._meta.clearanceSource, 'browser_cookie')
 })
 
-test('IUAM keeps waiting when any Turnstile response input is empty', async () => {
-  await assert.rejects(
-    solveIuam(
-      { domain: 'https://example.com', timeoutMs: 1000 },
-      createIuamPage({
-        cookieValues: ['transition-clearance'],
-        executeChallengeCheck: true,
-        emptyResponseCount: 1,
-      })
-    ),
-    (error) => error.code === 504 && error.detail?.phase === 'iuam_wait_challenge'
+test('IUAM accepts a normal page with an empty business Turnstile input', async () => {
+  const result = await solveIuam(
+    { domain: 'https://example.com', timeoutMs: 1000 },
+    createIuamPage({
+      cookieValues: ['page-clearance'],
+      executeChallengeCheck: true,
+      emptyResponseCount: 1,
+    })
   )
+  assert.equal(result.cf_clearance, 'page-clearance')
 })
 
 test('IUAM rejects a cookie while the challenge page remains', async () => {
@@ -382,7 +379,13 @@ function createTurnstilePage({ resultCount = 1, candidate = null, clickError = n
   }
   const page = {
     browser: () => ({ targets: () => [target] }),
-    evaluate: async () => candidate,
+    frames: () => [{
+      url: target.url,
+      frameElement: async () => ({
+        boundingBox: async () => candidate,
+        dispose: async () => {},
+      }),
+    }],
     mouse: {
       move: async () => {},
       click: async () => {
@@ -395,10 +398,10 @@ function createTurnstilePage({ resultCount = 1, candidate = null, clickError = n
   return { page, target, session, calls, getClicks: () => clicks }
 }
 
-test('Turnstile probe searches the challenge OOPIF shadow DOM', async () => {
+test('Turnstile click searches the challenge OOPIF shadow DOM', async () => {
   const { page, calls } = createTurnstilePage()
 
-  assert.deepEqual(await probeTurnstileCheckbox(page), { state: 'checkbox_ready' })
+  assert.deepEqual(await clickTurnstileOnce(page), { state: 'candidate_missing', clickCount: 0 })
   assert.deepEqual(
     calls.map(({ method }) => method),
     ['DOM.enable', 'DOM.performSearch', 'DOM.discardSearchResults']
@@ -407,12 +410,12 @@ test('Turnstile probe searches the challenge OOPIF shadow DOM', async () => {
   assert.equal(calls[1].params.includeUserAgentShadowDOM, true)
 })
 
-test('Turnstile automatic verification does not click', async () => {
+test('Turnstile does not click when no checkbox is found', async () => {
   const { page, getClicks } = createTurnstilePage({ resultCount: 0 })
 
   assert.deepEqual(await clickTurnstileOnce(page), {
-    state: 'automatic_verification',
-    clicked: false,
+    state: 'checkbox_missing',
+    clickCount: 0,
   })
   assert.equal(getClicks(), 0)
 })
@@ -421,7 +424,7 @@ test('Turnstile clicks one visible candidate when the checkbox is ready', async 
   const candidate = { source: 'iframe', x: 10, y: 20, width: 300, height: 65 }
   const { page, getClicks } = createTurnstilePage({ candidate })
 
-  assert.deepEqual(await clickTurnstileOnce(page), { state: 'clicked', clicked: true })
+  assert.deepEqual(await clickTurnstileOnce(page), { state: 'clicked', clickCount: 1 })
   assert.equal(getClicks(), 1)
 })
 
@@ -430,7 +433,7 @@ test('Turnstile does not click without a visible candidate', async () => {
 
   assert.deepEqual(await clickTurnstileOnce(page), {
     state: 'candidate_missing',
-    clicked: false,
+    clickCount: 0,
   })
   assert.equal(getClicks(), 0)
 })
@@ -445,7 +448,7 @@ test('Turnstile does not count a failed mouse click', async () => {
   assert.deepEqual(await clickTurnstileOnce(page), {
     state: 'click_error',
     error: 'mouse unavailable',
-    clicked: false,
+    clickCount: 0,
   })
   assert.equal(getClicks(), 0)
 })
@@ -471,7 +474,7 @@ test('IUAM clicks the response parent without falling back to generic candidates
     },
   }
 
-  assert.equal(await clickIuamTurnstileOnce(page), true)
+  assert.deepEqual(await clickIuamTurnstileOnce(page), { state: 'response_parent_clicked', clickCount: 1 })
   assert.equal(clicks, 1)
   assert.equal(disposed, 1)
 })
@@ -489,7 +492,13 @@ test('IUAM clicks a visible Turnstile iframe when no response element is exposed
   const page = {
     $$: async () => [],
     browser: () => ({ targets: () => [target] }),
-    evaluate: async () => ({ source: 'iframe', x: 10, y: 20, width: 300, height: 65 }),
+    frames: () => [{
+      url: target.url,
+      frameElement: async () => ({
+        boundingBox: async () => ({ x: 10, y: 20, width: 300, height: 65 }),
+        dispose: async () => {},
+      }),
+    }],
     mouse: {
       move: async () => {},
       click: async () => {
@@ -498,11 +507,11 @@ test('IUAM clicks a visible Turnstile iframe when no response element is exposed
     },
   }
 
-  assert.equal(await clickIuamTurnstileOnce(page), true)
+  assert.deepEqual(await clickIuamTurnstileOnce(page), { state: 'clicked', clickCount: 1 })
   assert.equal(clicks, 1)
 })
 
-test('Turnstile probe replaces the CDP session when its target changes', async () => {
+test('Turnstile click uses the current target on each attempt', async () => {
   let activeTarget
   let detached = 0
   const oldSession = {
@@ -533,9 +542,10 @@ test('Turnstile probe replaces the CDP session when its target changes', async (
   activeTarget = oldTarget
   const page = { browser: () => ({ targets: () => [activeTarget] }) }
 
-  assert.deepEqual(await probeTurnstileCheckbox(page), { state: 'automatic_verification' })
+  assert.deepEqual(await clickTurnstileOnce(page), { state: 'checkbox_missing', clickCount: 0 })
   activeTarget = newTarget
-  assert.deepEqual(await probeTurnstileCheckbox(page), { state: 'checkbox_ready' })
+  page.frames = () => []
+  assert.deepEqual(await clickTurnstileOnce(page), { state: 'candidate_missing', clickCount: 0 })
   assert.equal(detached, 1)
 })
 

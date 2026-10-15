@@ -1,6 +1,6 @@
 const { applyProxyAuthentication, readClearanceCookie } = require('../utils/browser')
 const { createError } = require('../utils/errors')
-const { sleep } = require('../utils/async')
+const { sleep, runUntil } = require('../utils/async')
 const { clickIuamTurnstileOnce } = require('../utils/turnstile/clicker')
 
 const POLL_INTERVAL_MS = 100
@@ -86,11 +86,15 @@ function observePage(page, origin) {
 async function readPageState(page, origin) {
   return page.evaluate(({ origin, titles, selectors, detectionPath }) => {
     const title = document.title.trim().toLowerCase()
-    const challenged = titles.some((value) => title.includes(value)) ||
-      selectors.some((selector) => document.querySelector(selector)) ||
-      [...document.querySelectorAll('[name="cf-turnstile-response"]')].some(
-        (element) => !element.value?.trim()
-      )
+    const challengeTitle = titles.find((value) => title.includes(value))
+    const challengeElement = selectors.find((selector) => {
+      const element = document.querySelector(selector)
+      if (!element || !element.getClientRects().length) return false
+      const style = getComputedStyle(element)
+      return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse'
+    })
+    // 业务页也可包含尚未填写的 Turnstile，空 token 不能证明整页仍被挑战拦截。
+    const challenged = Boolean(challengeTitle || challengeElement)
     const pattern = new RegExp(detectionPath)
     const detectors = [...document.scripts].flatMap((script) => {
       if (!script.src) return []
@@ -101,6 +105,9 @@ async function readPageState(page, origin) {
     return {
       sameOrigin: location.origin === origin,
       ready: document.readyState !== 'loading', challenged, detectors,
+      currentUrl: location.href,
+      pageTitle: document.title,
+      challengeEvidence: challengeTitle || challengeElement || null,
       userAgent: navigator.userAgent,
     }
   }, { origin, titles: CHALLENGE_TITLES, selectors: CHALLENGE_SELECTORS, detectionPath: DETECTION_PATH })
@@ -110,17 +117,31 @@ async function cloudflare(data, page) {
   if (!data.domain) throw createError('Missing domain parameter', 400)
   const startedAt = Date.now()
   const timeoutMs = Number(data.timeoutMs) || data.defaultTimeoutMs || 60000
-  const deadline = startedAt + timeoutMs
+  const deadline = data.requestDeadline || startedAt + timeoutMs
   const origin = new URL(data.domain).origin
   const observer = observePage(page, origin)
   let progress
   let nextClickAt = 0
-  let interactionAttempted = false
+  const interaction = { clickCount: 0, lastState: null, lastError: null }
+
+  function publishProgress() {
+    data.onProgress?.({ ...progress, interaction: { ...interaction } })
+  }
 
   function waiting(phase, reason, extra = {}) {
     progress = { phase, reason, ...extra }
-    data.onProgress?.(progress)
+    publishProgress()
     return null
+  }
+
+  async function readState(phase) {
+    try {
+      return await runUntil(deadline, phase, () => readPageState(page, origin))
+    } catch (error) {
+      if (error.code === 504) throw error
+      // 导航切换会销毁执行上下文，下一轮重新核对文档。
+      return null
+    }
   }
 
   async function captureClearance() {
@@ -137,12 +158,17 @@ async function cloudflare(data, page) {
     if (documentStatus < 200 || !navigation.domReady) {
       return waiting('iuam_wait_page', 'document_loading', { documentStatus })
     }
-    const state = await readPageState(page, origin).catch(() => null)
+    const state = await readState('iuam_read_page')
     if (!state || navigation !== observer.current() || !state.ready) {
       return waiting('iuam_wait_page', 'document_changed')
     }
     if (!state.sameOrigin) return waiting('iuam_wait_page', 'unexpected_origin', { documentStatus })
-    if (state.challenged) return waiting('iuam_wait_challenge', 'challenge_page', { documentStatus })
+    if (state.challenged) return waiting('iuam_wait_challenge', 'challenge_page', {
+      documentStatus,
+      currentUrl: state.currentUrl,
+      pageTitle: state.pageTitle,
+      challengeEvidence: state.challengeEvidence,
+    })
     for (const kind of state.detectors) navigation.detectors.add(kind)
     if (navigation.detectors.size &&
       (navigation.pending.size || !navigation.candidate?.cookie)) {
@@ -152,13 +178,13 @@ async function cloudflare(data, page) {
       })
     }
     const revision = navigation.revision
-    const clearance = await readClearanceCookie(page, data.domain)
+    const clearance = await runUntil(deadline, 'iuam_read_cookie', () => readClearanceCookie(page, data.domain))
     if (!clearance) return waiting('iuam_wait_clearance', 'cookie_not_issued', { documentStatus })
     if (navigation.detectors.size && clearance !== navigation.candidate?.cookie) {
       return waiting('iuam_wait_detection', 'cookie_not_applied', { documentStatus })
     }
-    const verified = await readPageState(page, origin).catch(() => null)
-    const current = await readClearanceCookie(page, data.domain)
+    const verified = await readState('iuam_verify_clearance')
+    const current = await runUntil(deadline, 'iuam_verify_clearance', () => readClearanceCookie(page, data.domain))
     if (!verified || !verified.sameOrigin || !verified.ready || verified.challenged ||
       verified.detectors.some((kind) => !navigation.detectors.has(kind)) ||
       navigation !== observer.current() || navigation.revision !== revision ||
@@ -195,15 +221,22 @@ async function cloudflare(data, page) {
           ...result,
           elapsed_time: (Date.now() - startedAt) / 1000,
           _meta: {
-            enteredClickMode: interactionAttempted,
+            interaction: { ...interaction },
             clearanceSource: 'browser_cookie',
             detectionCompleted,
           },
         }
       }
       if (progress.phase === 'iuam_wait_challenge' && Date.now() >= nextClickAt) {
-        const clicked = await clickIuamTurnstileOnce(page).catch(() => false)
-        interactionAttempted = interactionAttempted || clicked
+        const attempt = await clickIuamTurnstileOnce(page, { deadline })
+        interaction.clickCount += attempt.clickCount
+        interaction.lastState = attempt.state
+        interaction.lastError = attempt.error || null
+        publishProgress()
+        data.logger?.debug?.('event=iuam_click_attempt', {
+          request_id: data.requestId,
+          ...attempt,
+        })
         nextClickAt = Date.now() + CLICK_INTERVAL_MS
       }
       await sleep(Math.min(POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())))
@@ -212,8 +245,16 @@ async function cloudflare(data, page) {
       timeoutMs,
       label: 'IUAM',
       ...progress,
-      enteredClickMode: interactionAttempted,
     })
+  } catch (error) {
+    if (error.code === 504) {
+      error.detail = {
+        ...progress,
+        ...error.detail,
+        interaction: { ...interaction },
+      }
+    }
+    throw error
   } finally {
     observer.close()
   }

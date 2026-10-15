@@ -1,7 +1,15 @@
-const { sleep } = require('../async')
+const { runUntil, sleep } = require('../async')
 
 const CLICK_X_OFFSET = 30
-const checkboxSessions = new WeakMap()
+const DEFAULT_TIMEOUT_MS = 60000
+
+function result(state, clickCount = 0, error) {
+  return { state, clickCount, ...(error && { error: error.message || String(error) }) }
+}
+
+function detach(session) {
+  if (session?.detach) Promise.resolve().then(() => session.detach()).catch(() => {})
+}
 
 function isTurnstileTarget(target) {
   const url = target?.url?.() || ''
@@ -11,130 +19,124 @@ function isTurnstileTarget(target) {
   )
 }
 
-async function probeTurnstileCheckbox(page) {
+async function findTargetFrameBox(page, target, deadline) {
+  const frames = page.frames().filter((frame) => frame.url() === target.url())
+  if (frames.length !== 1) return null
+  const element = await runUntil(deadline, 'turnstile_frame_element', () => frames[0].frameElement())
   try {
-    const target = page.browser().targets().find(isTurnstileTarget)
-    if (!target) return { state: 'target_missing' }
-
-    let probe = checkboxSessions.get(page)
-    if (!probe || probe.target !== target) {
-      await probe?.session?.detach?.().catch(() => {})
-      const session = await target.createCDPSession()
-      await session.send('DOM.enable')
-      probe = { target, session }
-      checkboxSessions.set(page, probe)
-    }
-
-    const { searchId, resultCount } = await probe.session.send('DOM.performSearch', {
-      query: 'input[type=checkbox]',
-      includeUserAgentShadowDOM: true,
-    })
-    await probe.session.send('DOM.discardSearchResults', { searchId }).catch(() => {})
-    return { state: resultCount > 0 ? 'checkbox_ready' : 'automatic_verification' }
-  } catch (error) {
-    checkboxSessions.delete(page)
-    return { state: 'probe_error', error: error.message }
+    const box = await runUntil(deadline, 'turnstile_frame_box', () => element?.boundingBox())
+    if (!box || box.width <= 0 || box.height <= 0) return null
+    return box
+  } finally {
+    if (element?.dispose) Promise.resolve().then(() => element.dispose()).catch(() => {})
   }
 }
 
-async function findTurnstileClickCandidate(page) {
-  return page.evaluate(() => {
-    const candidates = []
-    const seen = new Set()
+async function clickTurnstileOnce(page, { deadline = Date.now() + DEFAULT_TIMEOUT_MS } = {}) {
+  if (Date.now() >= deadline) return result('deadline_exceeded')
+  let targets
+  try {
+    targets = page.browser().targets().filter(isTurnstileTarget)
+  } catch (error) {
+    return result('probe_error', 0, error)
+  }
+  if (targets.length === 0) return result('target_missing')
 
-    function add(element, source) {
-      if (!element) return
-      const rect = element.getBoundingClientRect()
-      if (!rect || rect.width <= 0 || rect.height <= 0 || rect.x < 0 || rect.y < 0) return
+  let sawCheckbox = false
+  let lastError
+  let lastFailureState = 'probe_error'
+  for (const target of targets) {
+    if (Date.now() >= deadline) return result('deadline_exceeded')
+    let session
+    let phase = 'probe_error'
+    try {
+      session = await runUntil(deadline, 'turnstile_session', () =>
+        target.createCDPSession().then((created) => {
+          if (Date.now() >= deadline) detach(created)
+          return created
+        }))
+      await runUntil(deadline, 'turnstile_dom_enable', () => session.send('DOM.enable'))
+      const { searchId, resultCount } = await runUntil(deadline, 'turnstile_checkbox_search', () =>
+        session.send('DOM.performSearch', {
+          query: 'input[type=checkbox]',
+          includeUserAgentShadowDOM: true,
+        }))
+      if (searchId) Promise.resolve().then(() => session.send('DOM.discardSearchResults', { searchId })).catch(() => {})
+      if (resultCount === 0) continue
+      sawCheckbox = true
 
-      const key = `${Math.round(rect.x)}:${Math.round(rect.y)}:${Math.round(rect.width)}:${Math.round(rect.height)}`
-      if (seen.has(key)) return
-      seen.add(key)
-      candidates.push({ source, x: rect.x, y: rect.y, width: rect.width, height: rect.height })
+      // Puppeteer's frameElement resolves the actual iframe, including one in a closed shadow root.
+      phase = 'candidate_error'
+      const box = await findTargetFrameBox(page, target, deadline)
+      if (!box) continue
+      const x = box.x + Math.min(CLICK_X_OFFSET, box.width / 2)
+      const y = box.y + box.height / 2
+      phase = 'click_error'
+      await runUntil(deadline, 'turnstile_mouse_move', () => page.mouse.move(x, y, { steps: 8 }))
+      await runUntil(deadline, 'turnstile_click_pause', () => sleep(120))
+      if (Date.now() >= deadline) return result('deadline_exceeded')
+      await runUntil(deadline, 'turnstile_mouse_click', () => page.mouse.click(x, y, { delay: 80 }))
+      return result('clicked', 1)
+    } catch (error) {
+      if (Date.now() >= deadline) return result('deadline_exceeded')
+      lastError = error
+      lastFailureState = phase
+    } finally {
+      detach(session)
     }
+  }
 
-    for (const input of document.querySelectorAll('[name="cf-turnstile-response"]')) {
-      add(input.parentElement, 'response_parent')
-    }
-    for (const iframe of document.querySelectorAll(
-      'iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[title*="challenge" i]'
-    )) {
-      add(iframe, 'iframe')
-    }
-    for (const element of document.querySelectorAll('.turnstile, [data-sitekey]')) {
-      add(element, 'container')
-    }
-    for (const element of document.querySelectorAll('div')) {
-      const rect = element.getBoundingClientRect()
-      if (rect.width > 290 && rect.width <= 310 && !element.querySelector('*')) {
-        add(element, 'empty_300px_box')
-      }
-    }
-
-    return candidates[0] || null
-  })
+  if (lastError) return result(lastFailureState, 0, lastError)
+  if (sawCheckbox) return result('candidate_missing')
+  return result('checkbox_missing')
 }
 
-async function clickTurnstileOnce(page, diagnostics) {
-  const probe = await probeTurnstileCheckbox(page)
-  diagnostics?.recordSolverState?.(probe.state)
-  if (probe.error) diagnostics?.recordSolverError?.(new Error(probe.error))
-  if (probe.state !== 'checkbox_ready') return { ...probe, clicked: false }
-
-  let candidate
-  try {
-    candidate = await findTurnstileClickCandidate(page)
-  } catch (error) {
-    diagnostics?.recordSolverError?.(error)
-    return { state: 'candidate_error', error: error.message, clicked: false }
-  }
-  diagnostics?.recordSolverAttempt?.(candidate ? [candidate] : [])
-  if (!candidate) return { state: 'candidate_missing', clicked: false }
-
-  const x = candidate.x + Math.min(CLICK_X_OFFSET, candidate.width / 2)
-  const y = candidate.y + candidate.height / 2
-  try {
-    await page.mouse.move(x, y, { steps: 8 })
-    await sleep(120)
-    await page.mouse.click(x, y, { delay: 80 })
-    diagnostics?.recordSolverClick?.()
-    return { state: 'clicked', clicked: true }
-  } catch (error) {
-    diagnostics?.recordSolverError?.(error)
-    return { state: 'click_error', error: error.message, clicked: false }
-  }
-}
-
-async function clickIuamTurnstileOnce(page) {
+async function clickIuamTurnstileOnce(page, { deadline = Date.now() + DEFAULT_TIMEOUT_MS } = {}) {
+  if (Date.now() >= deadline) return result('deadline_exceeded')
   // IUAM 页面可直接暴露隐藏响应元素；linux.do 依赖其父容器坐标，
   // 不能用普通 Turnstile 的 iframe/容器候选搜索替代这条路径。
-  const responseElements = await page.$$('[name="cf-turnstile-response"]')
-  if (responseElements.length > 0) {
-    for (const element of responseElements) {
-      let parentElement = null
-      try {
-        parentElement = await element.evaluateHandle((item) => item.parentElement)
-        const box = await parentElement.boundingBox()
-        if (!box) continue
-        await page.mouse.click(box.x + CLICK_X_OFFSET, box.y + box.height / 2)
-      } catch {
-      } finally {
-        if (parentElement?.dispose) await parentElement.dispose().catch(() => {})
-      }
-    }
-    return true
+  let responseElements
+  try {
+    responseElements = await runUntil(deadline, 'iuam_response_elements', () =>
+      page.$$('[name="cf-turnstile-response"]'))
+  } catch (error) {
+    return Date.now() >= deadline ? result('deadline_exceeded') : result('response_probe_error', 0, error)
   }
+
+  let clickCount = 0
+  let lastError
+  for (const element of responseElements) {
+    if (Date.now() >= deadline) return result('deadline_exceeded', clickCount)
+    let parent
+    try {
+      parent = await runUntil(deadline, 'iuam_response_parent', () =>
+        element.evaluateHandle((item) => item.parentElement))
+      const box = await runUntil(deadline, 'iuam_response_box', () => parent.boundingBox())
+      if (!box || box.width <= 0 || box.height <= 0) continue
+      if (Date.now() >= deadline) return result('deadline_exceeded', clickCount)
+      await runUntil(deadline, 'iuam_response_click', () =>
+        page.mouse.click(box.x + Math.min(CLICK_X_OFFSET, box.width / 2), box.y + box.height / 2))
+      clickCount += 1
+    } catch (error) {
+      if (Date.now() >= deadline) return result('deadline_exceeded', clickCount)
+      lastError = error
+    } finally {
+      if (parent?.dispose) Promise.resolve().then(() => parent.dispose()).catch(() => {})
+    }
+  }
+  if (clickCount > 0) return result('response_parent_clicked', clickCount)
+  if (Date.now() >= deadline) return result('deadline_exceeded')
 
   // Managed challenges expose the checkbox in a cross-origin iframe rather than
   // as a top-level response element. Reuse the guarded generic path so we only
   // click when the challenge target reports a real checkbox.
-  const result = await clickTurnstileOnce(page)
-  return result.clicked === true
+  const fallback = await clickTurnstileOnce(page, { deadline })
+  return fallback.clickCount === 0 && lastError && !fallback.error
+    ? { ...fallback, error: lastError.message }
+    : fallback
 }
 
 module.exports = {
   clickIuamTurnstileOnce,
   clickTurnstileOnce,
-  findTurnstileClickCandidate,
-  probeTurnstileCheckbox,
 }
