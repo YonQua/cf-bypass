@@ -91,6 +91,7 @@ IUAM clearance 自动获取要求：
 - 所有站点使用同一个读取入口，无需调用方选择模式；不按域名或响应是否 JSON 分类，也不要求 Cookie 必须再次变化。
 - 已实测 linux.do 正常页面加载 `/cdn-cgi/challenge-platform/scripts/precursor/main.js`，随后异步 POST 更新 Cookie；Shodan 本次观察没有后续检测。此结论描述当前行为，不是永久域名规则。
 - 获取匹配的 Cookie 后读取对应 UA，重新检查页面通过状态，再确认页面与 Cookie 未变化并自动返回、关闭浏览器。无需手动关闭窗口或按回车。
+- 导航与挑战观察并行；未发生点击时以 250ms 为最小探测间隔，点击后保留 2 秒间隔。整个过程共用请求总超时预算。
 - 此路径不写入缓存，避免复用先前的 Cookie。
 - 总预算耗尽时仍返回 504，`detail.phase` / `detail.reason` 保留具体原因：`iuam_wait_clearance` / `cookie_not_issued` 表示未观察到签发，`iuam_wait_challenge` 表示仍在挑战，`iuam_target_blocked` 表示目标 HTTP 错误，`iuam_wait_detection` 表示已识别检测未完成或失败。页面正常但没有 Cookie 不算求解成功。
 - 当前自动等待覆盖已观察的 Precursor/JSD 流程；未知检测不能仅凭路径相似认定已兼容。返回的是浏览器当时的快照，不保证 Cookie 不再轮换或其他接口、客户端可用。

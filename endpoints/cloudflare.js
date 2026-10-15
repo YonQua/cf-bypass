@@ -4,6 +4,7 @@ const { sleep, runUntil } = require('../utils/async')
 const { clickIuamTurnstileOnce } = require('../utils/turnstile/clicker')
 
 const POLL_INTERVAL_MS = 100
+const PROBE_INTERVAL_MS = 250
 const CLICK_INTERVAL_MS = 2000
 const DETECTION_PATH = '^/cdn-cgi/challenge-platform/(?:h/[^/]+/)?(?:scripts/)?(precursor|jsd)/'
 const CHALLENGE_TITLES = ['just a moment', 'attention required', '请稍候']
@@ -122,6 +123,8 @@ async function cloudflare(data, page) {
   const observer = observePage(page, origin)
   let progress
   let nextClickAt = 0
+  let navigationPending = true
+  let navigationError
   const interaction = { clickCount: 0, lastState: null, lastError: null }
 
   function publishProgress() {
@@ -201,13 +204,22 @@ async function cloudflare(data, page) {
   try {
     waiting('iuam_wait_page', 'navigation_pending')
     await applyProxyAuthentication(page, data.proxy)
-    await page.goto(data.domain, {
+    // 收到挑战响应即可开始处理；成功返回仍须通过文档和检测完成检查。
+    runUntil(deadline, 'iuam_navigation', () => page.goto(data.domain, {
       waitUntil: 'domcontentloaded',
       timeout: Math.max(1, deadline - Date.now()),
+    })).then(() => {
+      navigationPending = false
+    }, (error) => {
+      navigationPending = false
+      navigationError = error
     })
     while (Date.now() < deadline) {
+      if (navigationError) throw navigationError
+      const navigation = observer.current()
       const snapshot = await captureClearance()
-      if (snapshot) {
+      if (navigationError) throw navigationError
+      if (snapshot && !navigationPending && navigation === observer.current()) {
         const { detectionCompleted, ...result } = snapshot
         data.logger?.info?.('event=iuam_clearance_selected', {
           request_id: data.requestId,
@@ -237,8 +249,9 @@ async function cloudflare(data, page) {
           request_id: data.requestId,
           ...attempt,
         })
-        nextClickAt = Date.now() + CLICK_INTERVAL_MS
+        nextClickAt = Date.now() + (attempt.clickCount > 0 ? CLICK_INTERVAL_MS : PROBE_INTERVAL_MS)
       }
+      if (navigation !== observer.current()) continue
       await sleep(Math.min(POLL_INTERVAL_MS, Math.max(1, deadline - Date.now())))
     }
     throw createError(`IUAM timeout after ${timeoutMs}ms`, 504, {
