@@ -1,13 +1,8 @@
 const assert = require('node:assert/strict')
-const fs = require('node:fs')
-const os = require('node:os')
-const path = require('node:path')
 const test = require('node:test')
 
 const solveIuam = require('../endpoints/cloudflare')
 const { openApiDocument } = require('../openapi')
-const { createCacheStore } = require('../utils/cacheStore')
-const { isCacheableIuamResult } = require('../utils/cachePolicy')
 const { createSemaphore } = require('../utils/semaphore')
 const {
   clickIuamTurnstileOnce,
@@ -27,42 +22,6 @@ test('semaphore reports capacity and releases idempotently', () => {
   releaseFirst()
   assert.deepEqual(semaphore.getState(), { limit: 2, inUse: 1, available: 1 })
   releaseSecond()
-})
-
-test('cache persists atomically and exposes readiness state', async (t) => {
-  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cf-bypass-cache-'))
-  t.after(() => fs.promises.rm(directory, { recursive: true, force: true }))
-  const filePath = path.join(directory, 'cache.json')
-  const store = createCacheStore({
-    filePath,
-    dirPath: directory,
-    ttlMs: 60000,
-    flushIntervalMs: 60000,
-    flushDebounceMs: 60000,
-    logger: { warn() {}, debug() {} },
-  })
-
-  await store.start()
-  assert.equal(store.getState().loaded, true)
-  store.set('key', { value: 1 })
-  await store.stop()
-
-  const persisted = JSON.parse(await fs.promises.readFile(filePath, 'utf8'))
-  assert.deepEqual(persisted.key.value, { value: 1 })
-  assert.deepEqual(
-    (await fs.promises.readdir(directory)).filter((name) => name.endsWith('.tmp')),
-    []
-  )
-})
-
-test('IUAM cache only accepts strict cookie matches', () => {
-  assert.equal(isCacheableIuamResult({ clearanceSource: 'strict_cookie_match' }), true)
-  assert.equal(
-    isCacheableIuamResult({ clearanceSource: 'interaction_strict_cookie_match' }),
-    true
-  )
-  assert.equal(isCacheableIuamResult({ clearanceSource: 'verified_non_json_cookie_match' }), false)
-  assert.equal(isCacheableIuamResult(null), false)
 })
 
 test('OpenAPI document describes all public endpoints and timeout contract', () => {

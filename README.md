@@ -8,7 +8,7 @@
 
 - 支持 `iuam`、`turnstile` 与 `funcaptcha` 三种模式
 - 支持对象形式的 HTTP / HTTPS 代理，并兼容部分 `socks5://` 传输场景
-- IUAM 请求支持缓存，并通过 CloakBrowser 与共享 Turnstile clicker 处理需要点击的 managed challenge
+- IUAM 每次创建独立浏览器会话，不读取或写入 clearance 缓存；通过 CloakBrowser 与共享 Turnstile clicker 处理需要点击的 managed challenge
 - `funcaptcha` 模式支持打开受控页面并读取 `arkose_labs_token`
 - `turnstile` 与 `funcaptcha` 使用 `cloakbrowser/puppeteer` 启动 CloakBrowser stealth Chromium binary
 - 提供结构化日志与 `GET /health` 健康检查
