@@ -31,6 +31,7 @@ module.exports = {
   shutdownTimeoutMs: Math.max(10000, parseNumberEnv('SHUTDOWN_TIMEOUT_MS', 60000)),
   logTimeZone: readEnv('LOG_TIMEZONE') || 'Asia/Shanghai',
   logLevel: readEnv('LOG_LEVEL') || 'info',
+  logFormat: readEnv('LOG_FORMAT') || 'text',
   allowPrivateNetworkTargets: parseBooleanEnv(readEnv('ALLOW_PRIVATE_NETWORK_TARGETS'), true),
   cloakbrowser: {
     headless: parseBooleanEnv(readEnv('CLOAKBROWSER_HEADLESS'), false),

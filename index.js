@@ -5,7 +5,7 @@ const { normalizeProxy } = require('./utils/proxy')
 const { createBrowser, closeBrowser } = require('./utils/browser')
 const { createSemaphore } = require('./utils/semaphore')
 const { normalizeUrl, validateDomain } = require('./utils/domain')
-const { withTimeout } = require('./utils/async')
+const { withTimeout, sleep } = require('./utils/async')
 const { openApiDocument, docsHtml } = require('./openapi')
 const turnstile = require('./endpoints/turnstile')
 const funcaptcha = require('./endpoints/funcaptcha')
@@ -112,7 +112,7 @@ function rejectRequest(res, options) {
     error,
   } = options
   const normalized = normalizeError(error)
-  logger.warn('event=handler_reject', {
+  logger.request({
     ...buildRequestMeta({
       requestId,
       mode,
@@ -121,61 +121,12 @@ function rejectRequest(res, options) {
       failurePhase,
       code: normalized.code,
     }),
-    message: normalized.message,
+    error: normalized.message,
   })
   return res.status(normalized.code).json(normalized)
 }
 
-function logHandlerFailure(options) {
-  const {
-    logger,
-    requestId,
-    mode,
-    target,
-    requestElapsedMs,
-    failurePhase,
-    browserStartupMs,
-    browserProvider,
-    interaction,
-    proxyEnabled,
-    normalized,
-    error,
-  } = options
-  const meta = buildRequestMeta({
-    requestId,
-    mode,
-    target,
-    requestElapsedMs,
-    failurePhase,
-    browserStartupMs,
-    browserProvider,
-    interaction,
-    proxyEnabled,
-  })
-  Object.assign(meta, {
-    failure_reason: normalized.detail?.reason,
-    document_status: normalized.detail?.documentStatus,
-    current_url: buildLogTarget(normalized.detail?.currentUrl),
-    page_title: normalized.detail?.pageTitle,
-    challenge_evidence: normalized.detail?.challengeEvidence,
-  })
-
-  if (normalized.code >= 500) {
-    logger.error('event=handler_error', {
-      ...meta,
-      error: error?.message || normalized.message,
-    })
-    return
-  }
-
-  logger.warn('event=handler_reject', {
-    ...meta,
-    code: normalized.code,
-    message: normalized.message,
-  })
-}
-
-const logger = createLogger({ timeZone: config.logTimeZone, level: config.logLevel })
+const logger = createLogger({ timeZone: config.logTimeZone, level: config.logLevel, format: config.logFormat })
 
 const semaphore = createSemaphore(config.browserLimit)
 
@@ -374,61 +325,61 @@ app.post('/cloudflare', async (req, res) => {
     }
     failurePhase = normalized.detail?.phase || stage
     interaction = normalized.detail?.interaction || null
-    logHandlerFailure({
-      logger,
-      requestId,
-      mode: data.mode,
-      target,
-      requestElapsedMs: Date.now() - requestStartedAt,
-      failurePhase,
-      browserStartupMs,
-      browserProvider,
-      interaction,
-      proxyEnabled: Boolean(data.proxy),
-      normalized,
-      error: err,
-    })
     result = normalized
   } finally {
     clearTimeout(deadlineTimer)
     res.removeListener('close', cancel)
     if (!control.signal.aborted) control.abort(createError('Request finished', 499))
-    const closed = await closeBrowser(browser, {
-      timeoutMs: config.browserCloseTimeoutMs,
-      logger,
-      logMeta: {
+    try {
+      const { publicResult, internalMeta } = splitInternalResult(result)
+      if (internalMeta) {
+        interaction = internalMeta.interaction || null
+      }
+      logger.request({
+        ...buildRequestMeta({
+          requestId,
+          mode: data.mode,
+          target,
+          code: publicResult.code ?? 200,
+          cacheHit: data.mode === 'iuam' ? false : undefined,
+          requestElapsedMs: Date.now() - requestStartedAt,
+          browserStartupMs,
+          browserProvider,
+          failurePhase: publicResult.code ? failurePhase || stage : null,
+          interaction,
+          proxyEnabled: Boolean(data.proxy),
+        }),
+        solver_elapsed_ms: publicResult.elapsed_time === undefined ? undefined : Math.round(publicResult.elapsed_time * 1000),
+        failure_reason: publicResult.detail?.reason,
+        document_status: publicResult.detail?.documentStatus,
+        current_url: buildLogTarget(publicResult.detail?.currentUrl),
+        page_title: publicResult.detail?.pageTitle,
+        challenge_evidence: publicResult.detail?.challengeEvidence,
+        error: publicResult.code ? publicResult.message : undefined,
+      })
+
+      if (!res.destroyed) res.status(publicResult.code ?? 200).json({ ...publicResult, cached: false })
+    } finally {
+      const cleanupStartedAt = Date.now()
+      const closed = await closeBrowser(browser, {
+        timeoutMs: config.browserCloseTimeoutMs,
+        logger,
+        logMeta: {
+          request_id: requestId,
+          mode: data.mode,
+          ...(target ? { target } : {}),
+        },
+      })
+      if (closed && !browserLaunchPending && !browserCleanupFailed) release()
+      else if (browserLaunchPending) logger.warn('event=browser_launch_cleanup_pending', { request_id: requestId })
+      else logger.error('event=browser_capacity_retained', { request_id: requestId })
+      logger.debug('event=browser_cleanup_complete', {
         request_id: requestId,
-        mode: data.mode,
-        ...(target ? { target } : {}),
-      },
-    })
-    if (closed && !browserLaunchPending && !browserCleanupFailed) release()
-    else if (browserLaunchPending) logger.warn('event=browser_launch_cleanup_pending', { request_id: requestId })
-    else logger.error('event=browser_capacity_retained', { request_id: requestId })
+        cleanup_elapsed_ms: Date.now() - cleanupStartedAt,
+        resources_released: closed && !browserLaunchPending && !browserCleanupFailed,
+      })
+    }
   }
-
-  const { publicResult, internalMeta } = splitInternalResult(result)
-  if (internalMeta) {
-    interaction = internalMeta.interaction || null
-  }
-  logger.info(
-    'event=request_complete',
-    buildRequestMeta({
-      requestId,
-      mode: data.mode,
-      target,
-      code: publicResult.code ?? 200,
-      cacheHit: data.mode === 'iuam' ? false : undefined,
-      requestElapsedMs: Date.now() - requestStartedAt,
-      browserStartupMs,
-      browserProvider,
-      failurePhase: publicResult.code ? failurePhase || stage : null,
-      interaction,
-      proxyEnabled: Boolean(data.proxy),
-    })
-  )
-
-  if (!res.destroyed) res.status(publicResult.code ?? 200).json({ ...publicResult, cached: false })
 })
 
 app.get('/health', (req, res) => {
@@ -502,6 +453,8 @@ async function gracefulShutdown(signal) {
       })
     })
 
+    // HTTP responses finish before browser cleanup and delayed launch cleanup.
+    while (semaphore.getState().inUse > 0) await sleep(25)
     clearTimeout(shutdownTimer)
     logger.info('event=server_stopped')
     process.exit(0)

@@ -160,9 +160,7 @@ async function cloudflare(data, page) {
     if (response.headers()['cf-mitigated'] === 'challenge') {
       return waiting('iuam_wait_challenge', 'challenge_response', { documentStatus })
     }
-    if (documentStatus >= 400) {
-      return waiting('iuam_target_blocked', 'target_http_error', { documentStatus })
-    }
+    // Business error pages can still run detection and receive clearance cookies.
     if (documentStatus < 200 || !navigation.domReady) {
       return waiting('iuam_wait_page', 'document_loading', { documentStatus })
     }
@@ -227,7 +225,7 @@ async function cloudflare(data, page) {
       if (navigationError) throw navigationError
       if (snapshot && !navigationPending && navigation === observer.current()) {
         const { detectionCompleted, ...result } = snapshot
-        data.logger?.info?.('event=iuam_clearance_selected', {
+        data.logger?.debug?.('event=iuam_clearance_selected', {
           request_id: data.requestId,
           mode: 'iuam',
           source: 'browser_cookie',

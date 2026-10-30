@@ -93,7 +93,28 @@ function createLogger(options = {}) {
   const minLevel = normalizeLogLevel(options.level)
 
   function buildLine(level, message, meta) {
+    if (options.format === 'json') {
+      const event = /^event=([a-z_]+)$/.exec(message)?.[1]
+      return JSON.stringify({
+        ...meta,
+        timestamp: new Date().toISOString(),
+        level,
+        ...(event ? { event } : { message }),
+      })
+    }
     const time = formatNow()
+    if (message === 'event=request_complete') {
+      const parts = [meta.summary, meta.mode, meta.target, `HTTP ${meta.code}`]
+      if (meta.request_elapsed_ms !== undefined) parts.push(`${(meta.request_elapsed_ms / 1000).toFixed(2)}s`)
+      if (meta.click_attempt_count) parts.push(`clicks=${meta.click_attempt_count}`)
+      if (meta.failure_phase) parts.push(`phase=${meta.failure_phase}`)
+      if (meta.failure_reason) parts.push(`reason=${meta.failure_reason}`)
+      if (meta.error) parts.push(`error=${JSON.stringify(meta.error)}`)
+      parts.push(`request_id=${meta.request_id}`)
+      const summary = parts.filter(Boolean).join(' | ').replace(/[\u0000-\u001f\u007f]/g,
+        character => JSON.stringify(character).slice(1, -1))
+      return `[${time}] ${level.toUpperCase()} ${summary}`
+    }
     const metaText = meta && typeof meta === 'object' ? formatMeta(meta) : ''
     const suffix = metaText ? ` ${metaText}` : ''
     return `[${time}] level=${level} ${message}${suffix}`
@@ -127,6 +148,22 @@ function createLogger(options = {}) {
   }
 
   return {
+    request(meta) {
+      const code = meta.code ?? 200
+      const outcome = code < 400 ? 'success' : code === 504 ? 'timeout' : code === 499 ? 'cancelled' : code < 500 ? 'rejected' : 'failed'
+      const labels = { success: '获取成功', timeout: '请求超时', cancelled: '客户端取消', rejected: '请求被拒绝', failed: '获取失败' }
+      write(code >= 500 ? 'error' : code >= 400 ? 'warn' : 'info', 'event=request_complete', {
+        summary: labels[outcome], outcome,
+        target: meta.target, mode: meta.mode, code,
+        request_elapsed_ms: meta.request_elapsed_ms,
+        ...(meta.click_attempt_count > 0 ? { click_attempt_count: meta.click_attempt_count } : {}),
+        ...(meta.failure_phase ? { failure_phase: meta.failure_phase } : {}),
+        ...(meta.failure_reason ? { failure_reason: meta.failure_reason } : {}),
+        ...(meta.error ? { error: meta.error } : {}),
+        request_id: meta.request_id,
+      })
+      write('debug', 'event=request_details', meta)
+    },
     debug(message, meta) {
       write('debug', message, meta)
     },

@@ -123,11 +123,24 @@ async function closeBrowser(browser, options = {}) {
     catch (error) { if (error.code === 'ESRCH') return false; throw error }
   }
 
+  let exitCheck
   try {
-    await withTimeout(browser.close(), closeTimeoutMs, 'browser close', {
+    const closing = browser.close()
+    // The driver's protocol close promise may remain pending after process exit.
+    const exited = child && new Promise((resolve, reject) => {
+      const check = () => {
+        try {
+          if ((child.exitCode !== null || child.signalCode !== null) && (!group || !groupExists())) resolve('exited')
+        } catch (error) { reject(error) }
+      }
+      exitCheck = setInterval(check, 25)
+      check()
+    })
+    const completed = await withTimeout(exited ? Promise.race([closing, exited]) : closing, closeTimeoutMs, 'browser close', {
       phase: 'browser_close',
     })
     if (group && groupExists()) throw new Error('Browser process group remains after close')
+    if (completed === 'exited') browser.disconnect?.()
     return true
   } catch (error) {
     // Only terminate the process owned by this Browser, never a name/PID search.
@@ -171,6 +184,8 @@ async function closeBrowser(browser, options = {}) {
       ...(disconnected ? { fallback_disconnect: true } : {}),
     })
     return Boolean(processExited)
+  } finally {
+    clearInterval(exitCheck)
   }
 }
 

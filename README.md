@@ -58,6 +58,7 @@ docker compose up --build -d
 | `BROWSER_CLOSE_TIMEOUT_MS`      | `5000`          | 单次请求结束后等待浏览器关闭的最长时间                       |
 | `SHUTDOWN_TIMEOUT_MS`           | `60000`         | 服务优雅退出总超时，独立于请求超时                           |
 | `LOG_LEVEL`                     | `info`          | 日志级别：`debug` / `info` / `warn` / `error`                |
+| `LOG_FORMAT`                    | `text`          | `text` 为易读文本，`json` 为每行一个 JSON 对象，便于日志采集 |
 | `LOG_TIMEZONE`                  | `Asia/Shanghai` | 日志时区（IANA）                                             |
 | `ALLOW_PRIVATE_NETWORK_TARGETS` | `true`          | 是否允许 `localhost`、私网、回环、链路本地字面量地址作为目标 |
 | `CLOAKBROWSER_HEADLESS`         | `false`         | CloakBrowser 是否使用 headless 模式；Docker Compose 通过 Xvfb 默认使用 headful |
@@ -77,8 +78,12 @@ docker compose up --build -d
 - Linux/macOS 清理会检查本请求的独立浏览器进程组；启动后的包装层初始化失败也会回收已创建的浏览器。此边界依赖当前 Puppeteer 启动器的独立进程组行为，升级依赖时需重新验证。
 - 日志统一过滤 URL 查询参数、用户信息及已知凭据字段；显式开启的私有调试产物仍保留原始内容。
 
-- `info`（默认）：保留 `server_*`、`request_complete`、`handler_reject`、`handler_error` 这类摘要与异常日志
-- `debug`：额外输出 `request_start`、`browser_ready`、`iuam_clearance_update_waiting` 等排障细节
+- `info`（默认）：每次请求输出一条结果摘要，包含状态、目标、模式、耗时和请求编号；失败保留阶段与原因。资源清理等独立异常仍会单独记录。
+- `debug`：额外输出 `request_start`、`browser_ready`、`iuam_clearance_selected`、`request_details` 等排障细节。
+- 默认文本摘要适合直接查看容器日志；机器采集请设置 `LOG_FORMAT=json`，使用 `event=request_complete`、`outcome` 和 `request_id` 关联结果，`request_elapsed_ms` 为数值毫秒。JSON 时间戳使用 UTC ISO 8601，文本使用 `LOG_TIMEZONE`。
+- 请求结果统一为 `request_complete`，不再单独输出 `handler_reject` / `handler_error`；已有日志采集规则需对应调整。成功为 info，请求拒绝或取消为 warn，服务错误或超时为 error。
+- 结果就绪后立即发送响应，浏览器清理完成后才释放并发名额。`request_elapsed_ms` 统计到响应发送前，不包含随后清理；返回的 `elapsed_time` 保持业务执行秒数语义。debug 的 `request_details.solver_elapsed_ms` 为业务执行毫秒数，`browser_cleanup_complete.cleanup_elapsed_ms` 单独记录清理耗时。
+- 优雅退出会等待已发送响应的请求完成浏览器清理；超过 `SHUTDOWN_TIMEOUT_MS` 则以失败状态退出。
 - logger 会自动省略 `null` / `undefined` 字段，避免成功日志被空值刷屏
 - 摘要日志中的 `target` 会保留协议、主机与路径，但默认省略 query / hash，兼顾定位与降噪
 
@@ -101,7 +106,7 @@ IUAM clearance 自动获取要求：
 - 获取匹配的 Cookie 后读取对应 UA，重新检查页面通过状态，再确认页面与 Cookie 未变化并自动返回、关闭浏览器。无需手动关闭窗口或按回车。
 - 导航与挑战观察并行；未发生点击时以 250ms 为最小探测间隔，点击后保留 2 秒间隔。整个过程共用请求总超时预算。
 - 此路径不写入缓存，避免复用先前的 Cookie。
-- 总预算耗尽时仍返回 504，`detail.phase` / `detail.reason` 保留具体原因：`iuam_wait_clearance` / `cookie_not_issued` 表示未观察到签发，`iuam_wait_challenge` 表示仍在挑战，`iuam_target_blocked` 表示目标 HTTP 错误，`iuam_wait_detection` 表示已识别检测未完成或失败。页面正常但没有 Cookie 不算求解成功。
+- 总预算耗尽时仍返回 504，`detail.phase` / `detail.reason` 保留具体原因：`iuam_wait_clearance` / `cookie_not_issued` 表示未观察到签发，`iuam_wait_challenge` 表示仍在挑战，`iuam_wait_detection` 表示已识别检测未完成或失败。目标页面返回 404 等业务 HTTP 错误时仍会检查检测完成与 Cookie 一致性，状态码本身不否决获取结果；没有 Cookie 不算求解成功。
 - 当前自动等待覆盖已观察的 Precursor/JSD 流程；未知检测不能仅凭路径相似认定已兼容。返回的是浏览器当时的快照，不保证 Cookie 不再轮换或其他接口、客户端可用。
 
 Turnstile 的结果是 `token`，不是 `cf_clearance`。当前接口在目标 URL 上使用合成 widget 页面；返回 Token 只说明该流程产生了 Token，不代表原站业务请求已通过服务端验证，也不保证签发 pre-clearance Cookie。
@@ -141,7 +146,7 @@ Docker/CloakBrowser 排障要点：
 
 Turnstile 超时排障说明：
 
-- 默认会在失败日志与错误 detail 中记录 `apiScriptRequested`、`apiScriptLoaded`、`apiScriptStatus`、`turnstileStatusCounts`、`turnstileNonOkResponses`、`turnstileIframeCount`、`consoleErrorCount`、`currentUrl`、`pageTitle`
+- debug 失败诊断日志与错误 detail 中记录 `apiScriptRequested`、`apiScriptLoaded`、`apiScriptStatus`、`turnstileStatusCounts`、`turnstileNonOkResponses`、`turnstileIframeCount`、`consoleErrorCount`、`currentUrl`、`pageTitle`
 - Turnstile 会逐个探测 challenge target 的 checkbox，并只点击与已就绪 target 对应的 iframe；IUAM 保留响应元素父容器优先路径，不可点击时再检查 iframe
 - token 读取会同时检查自定义 `cf-response` 与 Cloudflare 自带的 `cf-turnstile-response`
 - 当请求体设置 `"debugArtifacts": true` 时，失败会在预留诊断预算内尝试写入 `summary.json`、`html-summary.txt` 与 `screenshot.png`；页面采集或截图超时可能只留下部分工件

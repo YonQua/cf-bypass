@@ -328,7 +328,7 @@ function createTurnstileDiagnostics({ page, requestId, logger, debugArtifacts })
     }
 
     const detail = buildDetail({ timeoutMs, phase, state, pageState, artifactDir })
-    logger?.warn?.('event=turnstile_debug_state', {
+    logger?.debug?.('event=turnstile_debug_state', {
       request_id: requestId,
       mode: 'turnstile',
       phase,
