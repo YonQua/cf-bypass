@@ -30,6 +30,20 @@ function formatMetaValue(value) {
   return JSON.stringify(value)
 }
 
+function redact(value, key = '') {
+  if (/^(?:cookie|set-cookie|authorization|password|authToken|token|cf_clearance)$/i.test(key)) return '[redacted]'
+  if (Array.isArray(value)) return value.map(item => redact(item))
+  if (value && typeof value === 'object') return Object.fromEntries(
+    Object.entries(value).map(([name, item]) => [name, redact(item, name)])
+  )
+  if (typeof value !== 'string') return value
+  return value.replace(/\b(?:authorization|cookie|set-cookie)\s*[:=][^\r\n]*/gi, '[redacted-header]')
+    .replace(/\b(?:https?|socks[45]):\/\/[^\s"'<>]+/gi, raw => {
+    try { const url = new URL(raw); return `${url.protocol}//${url.host}${url.pathname}` }
+    catch { return '[invalid-url]' }
+  }).replace(/\b(cf_clearance|token|authToken|password|authorization|cookie)\s*[:=]\s*[^\s,;]+/gi, '$1=[redacted]')
+}
+
 function formatMeta(meta) {
   return Object.entries(meta)
     .map(([key, value]) => `${key}=${formatMetaValue(value)}`)
@@ -100,7 +114,7 @@ function createLogger(options = {}) {
   function write(level, message, meta) {
     if (!shouldLog(level)) return
 
-    const line = buildLine(level, message, sanitizeMeta(meta))
+    const line = buildLine(level, redact(message), redact(sanitizeMeta(meta)))
     if (level === 'warn') {
       console.warn(line)
       return

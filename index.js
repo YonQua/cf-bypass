@@ -260,6 +260,9 @@ app.post('/cloudflare', async (req, res) => {
     data.proxy = normalizeProxy(data.proxy)
     data.browserPlatform = parseBrowserPlatform(data.browserPlatform)
     requestTimeout = parseRequestTimeout(data.timeoutMs)
+    if (data.mode === 'turnstile' && (typeof data.siteKey !== 'string' || !data.siteKey.trim())) {
+      throw createError('Bad Request: siteKey must be a non-empty string', 400)
+    }
     requestDeadline = requestStartedAt + requestTimeout
   } catch (err) {
     return rejectRequest(res, {
@@ -292,6 +295,14 @@ app.post('/cloudflare', async (req, res) => {
   let browser, page
   let browserProvider = null
   let latestIuamProgress = null
+  let browserLaunchPending = false
+  let browserCleanupFailed = false
+  const control = new AbortController()
+  const cancel = () => control.abort(createError('Request cancelled', 499))
+  res.once('close', cancel)
+  const deadlineTimer = setTimeout(() => control.abort(
+    createError('Request deadline exceeded', 504, { phase: stage, label: 'request' })
+  ), Math.max(1, requestDeadline - Date.now()))
 
   try {
     stage = 'browser_connect'
@@ -300,6 +311,12 @@ app.post('/cloudflare', async (req, res) => {
       proxy: data.proxy,
       platform: data.browserPlatform,
       timeoutMs: remainingTime(requestDeadline),
+      signal: control.signal,
+      logger,
+      onLaunchSettled: (closed) => {
+        if (closed) release()
+        else logger.error('event=browser_capacity_retained', { request_id: requestId })
+      },
     })
     browserStartupMs = Date.now() - browserStartedAt
     browser = ctx.browser
@@ -321,6 +338,7 @@ app.post('/cloudflare', async (req, res) => {
           ...data,
           timeoutMs: solverTimeout,
           requestDeadline,
+          signal: control.signal,
           logger,
           requestId,
           ...(data.mode === 'iuam'
@@ -337,10 +355,13 @@ app.post('/cloudflare', async (req, res) => {
       'request',
       {
         phase: stage,
+        signal: control.signal,
         message: `Request timeout after ${requestTimeout}ms`,
       }
     )
   } catch (err) {
+    browserLaunchPending = Boolean(err.browserLaunchPending)
+    browserCleanupFailed = Boolean(err.browserCleanupFailed)
     const normalized = normalizeError(err)
     if (
       data.mode === 'iuam' &&
@@ -369,7 +390,10 @@ app.post('/cloudflare', async (req, res) => {
     })
     result = normalized
   } finally {
-    await closeBrowser(browser, {
+    clearTimeout(deadlineTimer)
+    res.removeListener('close', cancel)
+    if (!control.signal.aborted) control.abort(createError('Request finished', 499))
+    const closed = await closeBrowser(browser, {
       timeoutMs: config.browserCloseTimeoutMs,
       logger,
       logMeta: {
@@ -378,7 +402,9 @@ app.post('/cloudflare', async (req, res) => {
         ...(target ? { target } : {}),
       },
     })
-    release()
+    if (closed && !browserLaunchPending && !browserCleanupFailed) release()
+    else if (browserLaunchPending) logger.warn('event=browser_launch_cleanup_pending', { request_id: requestId })
+    else logger.error('event=browser_capacity_retained', { request_id: requestId })
   }
 
   const { publicResult, internalMeta } = splitInternalResult(result)
@@ -402,7 +428,7 @@ app.post('/cloudflare', async (req, res) => {
     })
   )
 
-  res.status(publicResult.code ?? 200).json({ ...publicResult, cached: false })
+  if (!res.destroyed) res.status(publicResult.code ?? 200).json({ ...publicResult, cached: false })
 })
 
 app.get('/health', (req, res) => {

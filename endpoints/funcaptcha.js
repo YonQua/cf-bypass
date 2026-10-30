@@ -6,7 +6,7 @@ const ARKOSE_TOKEN_SELECTOR = 'input[name="arkose_labs_token"]'
 const FUNCAPTCHA_EXECUTE_GRACE_MS = 2000
 const FUNCAPTCHA_STATE_TIMEOUT_MS = 1000
 
-async function funcaptcha({ domain, proxy, timeoutMs, defaultTimeoutMs }, page) {
+async function funcaptcha({ domain, proxy, timeoutMs, defaultTimeoutMs, signal }, page) {
   if (!domain) throw createError('Missing domain parameter', 400)
 
   const timeout = Number(timeoutMs) || defaultTimeoutMs || 60000
@@ -93,11 +93,14 @@ async function funcaptcha({ domain, proxy, timeoutMs, defaultTimeoutMs }, page) 
   }
 
   const workPromise = (async () => {
+    signal?.throwIfAborted()
     await applyProxyAuthentication(page, proxy)
 
     await gotoTarget()
+    signal?.throwIfAborted()
     await failIfUnsupportedChallenge()
     await waitForTokenValue()
+    signal?.throwIfAborted()
 
     const result = await page.evaluate((selector) => {
       const input = document.querySelector(selector)
@@ -123,6 +126,7 @@ async function funcaptcha({ domain, proxy, timeoutMs, defaultTimeoutMs }, page) 
   })()
 
   return withTimeout(workPromise, timeout + FUNCAPTCHA_EXECUTE_GRACE_MS, 'FunCaptcha', {
+    signal,
     phase: 'funcaptcha_execute',
   })
 }

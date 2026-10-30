@@ -1,10 +1,10 @@
-const config = require('../config')
-const { withTimeout } = require('./async')
 const { createError } = require('./errors')
+const { createBrowser, closeBrowser } = require('./browser_lifecycle')
 
 async function readClearanceCookie(page, targetUrl) {
   const target = new URL(targetUrl)
   const cookies = await page.browserContext().cookies()
+  const now = Date.now() / 1000
   const matches = cookies.filter((cookie) => {
     if (cookie.name !== 'cf_clearance' || !cookie.value || cookie.partitionKeyOpaque) return false
     const domain = cookie.domain.replace(/^\./, '')
@@ -15,7 +15,7 @@ async function readClearanceCookie(page, targetUrl) {
       !(target.pathname.startsWith(path) &&
         (path.endsWith('/') || target.pathname[path.length] === '/'))) return false
     if (cookie.secure && target.protocol !== 'https:') return false
-    if (cookie.expires > 0 && cookie.expires <= Date.now() / 1000) return false
+    if (cookie.expires > 0 && cookie.expires <= now) return false
     if (cookie.partitionKey) {
       const partitionOrigin = typeof cookie.partitionKey === 'string'
         ? cookie.partitionKey
@@ -63,95 +63,6 @@ async function applyRequestInterception(page, handler, options = {}) {
       } catch {}
     }
   })
-}
-
-function buildCloakbrowserProxy(proxy) {
-  if (!proxy?.url) return undefined
-
-  const parsed = new URL(proxy.url)
-  if (parsed.protocol === 'socks5:') {
-    if (!proxy.username && !proxy.password) return proxy.url
-
-    parsed.username = proxy.username
-    parsed.password = proxy.password
-    return parsed.href.replace(/\/$/, '')
-  }
-
-  const result = { server: proxy.url }
-  if (proxy.username) result.username = proxy.username
-  if (proxy.password) result.password = proxy.password
-  return result
-}
-
-async function createBrowser({ proxy, platform = config.browserPlatform, timeoutMs }) {
-  const deadline = Date.now() + (Number(timeoutMs) || 60000)
-  const remainingTime = () => Math.max(1, deadline - Date.now())
-  const { launch } = await withTimeout(
-    import('cloakbrowser/puppeteer'),
-    remainingTime(),
-    'browser module load',
-    { phase: 'browser_module_load' }
-  )
-  const launchTimeoutMs = remainingTime()
-
-  const browser = await withTimeout(
-    launch({
-      headless: config.cloakbrowser.headless,
-      humanize: config.cloakbrowser.humanize,
-      stealthArgs: config.cloakbrowser.stealthArgs,
-      timezone: config.cloakbrowser.timezone,
-      locale: config.cloakbrowser.locale,
-      proxy: buildCloakbrowserProxy(proxy),
-      args: [`--fingerprint-platform=${platform}`],
-      launchOptions: {
-        defaultViewport: null,
-        timeout: launchTimeoutMs,
-      },
-    }),
-    launchTimeoutMs,
-    'browser connect'
-  )
-  let page
-  try {
-    page = await withTimeout(browser.newPage(), remainingTime(), 'browser new page', {
-      phase: 'browser_new_page',
-    })
-  } catch (error) {
-    await closeBrowser(browser, { timeoutMs: remainingTime() })
-    throw error
-  }
-  page.__proxyAuthenticationHandled = Boolean(proxy?.username && proxy?.password)
-
-  return { browser, page, provider: 'cloakbrowser' }
-}
-
-async function closeBrowser(browser, options = {}) {
-  if (!browser) return
-
-  const { timeoutMs, logger, logMeta } = options
-  const closeTimeoutMs = Number(timeoutMs) || 5000
-  let disconnected = false
-
-  try {
-    await withTimeout(browser.close(), closeTimeoutMs, 'browser close', {
-      phase: 'browser_close',
-    })
-  } catch (error) {
-    if (typeof browser.disconnect === 'function') {
-      try {
-        browser.disconnect()
-        disconnected = true
-      } catch {}
-    }
-
-    logger?.warn?.('event=browser_close_failed', {
-      ...logMeta,
-      timeout_ms: closeTimeoutMs,
-      error: error.message,
-      ...(error?.detail?.phase ? { failure_phase: error.detail.phase } : {}),
-      ...(disconnected ? { fallback_disconnect: true } : {}),
-    })
-  }
 }
 
 module.exports = {

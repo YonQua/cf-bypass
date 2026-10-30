@@ -4,12 +4,13 @@ const { clickTurnstileOnce } = require('./clicker')
 const POLL_INTERVAL_MS = 250
 const CLICK_RETRY_INTERVAL_MS = 5000
 
-async function waitForTurnstile(page, { timeoutMs, deadline = Date.now() + timeoutMs, readValue, diagnostics }) {
+async function waitForTurnstile(page, { timeoutMs, deadline = Date.now() + timeoutMs, readValue, diagnostics, signal }) {
   const interaction = { clickCount: 0, lastState: null, lastError: null }
   diagnostics?.recordInteraction(interaction)
   let nextClickAt = 0
 
   while (Date.now() < deadline) {
+    signal?.throwIfAborted()
     const value = await runUntil(deadline, 'turnstile_wait_token', readValue)
     if (Date.now() >= deadline) break
     if (value) return { value, interaction }

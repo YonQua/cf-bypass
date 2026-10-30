@@ -6,6 +6,8 @@
 
 ## 功能特性
 
+代码调用链：`index.js` 负责校验、并发名额、请求取消与响应；`endpoints/` 负责各模式的完成条件；`utils/browser.js` 提供页面操作与 Cookie 读取，浏览器启动和进程回收由 `utils/browser_lifecycle.js` 负责。共享点击逻辑与诊断位于 `utils/turnstile/`。浏览器生命周期模块的原有函数仍通过 `utils/browser.js` 导出，调用方保持不变。
+
 - 支持 `iuam`、`turnstile` 与 `funcaptcha` 三种模式
 - 支持对象形式的 HTTP / HTTPS 代理，并兼容部分 `socks5://` 传输场景
 - IUAM 每次创建独立浏览器会话，不读取或写入 clearance 缓存；通过 CloakBrowser 与共享 Turnstile clicker 处理需要点击的 managed challenge
@@ -68,6 +70,12 @@ docker compose up --build -d
 | `CLOAKBROWSER_BINARY_PATH`      | `null`          | 可选指定本地 CloakBrowser binary；设置后会跳过默认版本映射   |
 
 日志级别说明：
+
+- IUAM 在 debug 日志中记录最近 64 次等待阶段变化及相对耗时，不记录 Cookie 值。
+- 调试产物目录使用 0700、文件使用 0600；原始 HTML 和截图仍属于敏感材料。
+- 客户端断开或请求超时会进入浏览器清理；迟到的浏览器启动结果也会回收。关闭失败时仅终止本请求拥有的浏览器进程；无法确认回收则保留并发占用并告警，需排查后恢复服务。
+- Linux/macOS 清理会检查本请求的独立浏览器进程组；启动后的包装层初始化失败也会回收已创建的浏览器。此边界依赖当前 Puppeteer 启动器的独立进程组行为，升级依赖时需重新验证。
+- 日志统一过滤 URL 查询参数、用户信息及已知凭据字段；显式开启的私有调试产物仍保留原始内容。
 
 - `info`（默认）：保留 `server_*`、`request_complete`、`handler_reject`、`handler_error` 这类摘要与异常日志
 - `debug`：额外输出 `request_start`、`browser_ready`、`iuam_clearance_update_waiting` 等排障细节
@@ -281,10 +289,6 @@ utils/
 docker-compose.yml
 Dockerfile
 ```
-
-## 致谢
-
-- [cf-bypass-fast](https://github.com/AkaneSakuramori/cf-bypass-fast)
 
 ## 说明
 

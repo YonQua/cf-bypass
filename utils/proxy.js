@@ -28,7 +28,9 @@ function normalizeProxyUrl(rawUrl) {
     throw createError('Bad Request: proxy.url hostname is required', 400)
   }
 
-  if (!parsed.port) {
+  const port = parsed.port || (protocol === 'http:' ? '80' : protocol === 'https:' ? '443' : '')
+  const authority = rawUrl.trim().match(/^[a-z][a-z\d+.-]*:\/\/([^/?#]*)/i)?.[1] || ''
+  if (!port || !/:\d+$/.test(authority)) {
     throw createError('Bad Request: proxy.url port is required', 400)
   }
 
@@ -49,7 +51,7 @@ function normalizeProxyUrl(rawUrl) {
   }
 
   const hostname = formatProxyHostname(parsed.hostname.toLowerCase())
-  return `${protocol}//${hostname}:${parsed.port}`
+  return `${protocol}//${hostname}:${port}`
 }
 
 function normalizeProxy(proxy) {

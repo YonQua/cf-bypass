@@ -1,6 +1,7 @@
 const fs = require('fs')
 const path = require('path')
 const { runUntil } = require('../async')
+const { normalizeUrl } = require('../domain')
 
 const STATE_TIMEOUT_MS = 1000
 const ARTIFACT_ROOT = process.env.DEBUG_ARTIFACT_DIR || '/tmp/cf-bypass-artifacts'
@@ -93,7 +94,7 @@ function summarizeTurnstileResponses(turnstileRequests) {
   }
 }
 
-async function capturePageState(page, deadline) {
+async function capturePageState(page, deadline, includeArtifacts) {
   try {
     return await runUntil(deadline, 'turnstile_state_capture',
       () => page.evaluate((limits) => {
@@ -110,8 +111,9 @@ async function capturePageState(page, deadline) {
           window.__turnstileWidgetId !== undefined
             ? String(window.turnstile.getResponse(window.__turnstileWidgetId) || '').trim()
             : ''
-        const html = document.documentElement?.outerHTML || ''
-        const bodyText = document.body?.innerText || ''
+        // Serialization and innerText layout are only needed by private artifacts.
+        const html = limits.includeArtifacts ? document.documentElement?.outerHTML || '' : ''
+        const bodyText = limits.includeArtifacts ? document.body?.innerText || '' : ''
 
         return {
           currentUrl: window.location.href,
@@ -141,6 +143,7 @@ async function capturePageState(page, deadline) {
           htmlLength: html.length,
         }
       }, {
+        includeArtifacts,
         maxBodyTextLength: MAX_BODY_TEXT_LENGTH,
         maxHtmlSampleLength: MAX_HTML_SAMPLE_LENGTH,
       }),
@@ -168,7 +171,7 @@ function buildDetail({ timeoutMs, phase, state, pageState, artifactDir }) {
     consoleErrorCount: state.consoleErrors.length,
     pageErrorCount: state.pageErrors.length,
     failedRequestCount: state.failedRequests.length,
-    currentUrl: pageState?.currentUrl,
+    currentUrl: normalizeUrl(pageState?.currentUrl),
     pageTitle: pageState?.pageTitle,
     apiObjectPresent: pageState?.apiObjectPresent,
     renderFunctionPresent: pageState?.renderFunctionPresent,
@@ -198,10 +201,11 @@ function createTurnstileDiagnostics({ page, requestId, logger, debugArtifacts })
 
   function attach() {
     page.on('console', (message) => {
+      if (!shouldWriteArtifacts && !['error', 'warning', 'warn'].includes(message.type())) return
       const entry = {
         type: message.type(),
         text: message.text(),
-        location: message.location(),
+        ...(shouldWriteArtifacts ? { location: message.location() } : {}),
       }
       pushLimited(state.consoleMessages, entry, MAX_CONSOLE_ENTRIES)
       if (['error', 'warning', 'warn'].includes(entry.type)) {
@@ -271,7 +275,8 @@ function createTurnstileDiagnostics({ page, requestId, logger, debugArtifacts })
       ARTIFACT_ROOT,
       `turnstile-${safeRequestId(requestId)}-${Date.now()}`
     )
-    await write(() => fs.promises.mkdir(artifactDir, { recursive: true }))
+    await write(() => fs.promises.mkdir(artifactDir, { recursive: true, mode: 0o700 }))
+    await write(() => fs.promises.chmod(artifactDir, 0o700))
 
     const summary = {
       reason,
@@ -283,23 +288,23 @@ function createTurnstileDiagnostics({ page, requestId, logger, debugArtifacts })
     await write(() => fs.promises.writeFile(
       path.join(artifactDir, 'summary.json'),
       JSON.stringify(summary, null, 2),
-      'utf-8'
+      { encoding: 'utf-8', mode: 0o600, flag: 'wx' }
     ))
 
     if (pageState?.htmlSample) {
-      await write(() => fs.promises.writeFile(path.join(artifactDir, 'html-summary.txt'), pageState.htmlSample, 'utf-8'))
+      await write(() => fs.promises.writeFile(path.join(artifactDir, 'html-summary.txt'), pageState.htmlSample,
+        { encoding: 'utf-8', mode: 0o600, flag: 'wx' }))
     }
 
     try {
-      await write(() => page.screenshot({
-        path: path.join(artifactDir, 'screenshot.png'),
-        fullPage: true,
-      }))
+      const screenshot = await write(() => page.screenshot({ fullPage: true }))
+      await write(() => fs.promises.writeFile(path.join(artifactDir, 'screenshot.png'), screenshot,
+        { mode: 0o600, flag: 'wx' }))
     } catch (error) {
       await write(() => fs.promises.writeFile(
         path.join(artifactDir, 'screenshot-error.txt'),
         error.message,
-        'utf-8'
+        { encoding: 'utf-8', mode: 0o600, flag: 'wx' }
       ))
     }
 
@@ -308,7 +313,7 @@ function createTurnstileDiagnostics({ page, requestId, logger, debugArtifacts })
 
   async function captureFailure({ timeoutMs, phase, reason, deadline = Date.now() + 2000 }) {
     let artifactDir = null
-    const pageState = await capturePageState(page, deadline)
+    const pageState = await capturePageState(page, deadline, shouldWriteArtifacts)
 
     if (shouldWriteArtifacts) {
       try {

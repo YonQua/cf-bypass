@@ -105,35 +105,42 @@ async function clickIuamTurnstileOnce(page, { deadline = Date.now() + DEFAULT_TI
 
   let clickCount = 0
   let lastError
-  for (const element of responseElements) {
-    if (Date.now() >= deadline) return result('deadline_exceeded', clickCount)
-    let parent
-    try {
-      parent = await runUntil(deadline, 'iuam_response_parent', () =>
-        element.evaluateHandle((item) => item.parentElement))
-      const box = await runUntil(deadline, 'iuam_response_box', () => parent.boundingBox())
-      if (!box || box.width <= 0 || box.height <= 0) continue
+  try {
+    for (const element of responseElements) {
       if (Date.now() >= deadline) return result('deadline_exceeded', clickCount)
-      await runUntil(deadline, 'iuam_response_click', () =>
-        page.mouse.click(box.x + Math.min(CLICK_X_OFFSET, box.width / 2), box.y + box.height / 2))
-      clickCount += 1
-    } catch (error) {
-      if (Date.now() >= deadline) return result('deadline_exceeded', clickCount)
-      lastError = error
-    } finally {
-      if (parent?.dispose) Promise.resolve().then(() => parent.dispose()).catch(() => {})
+      let parent
+      try {
+        parent = await runUntil(deadline, 'iuam_response_parent', () =>
+          element.evaluateHandle((item) => item.parentElement))
+        const box = await runUntil(deadline, 'iuam_response_box', () => parent.boundingBox())
+        if (!box || box.width <= 0 || box.height <= 0) continue
+        if (Date.now() >= deadline) return result('deadline_exceeded', clickCount)
+        await runUntil(deadline, 'iuam_response_click', () =>
+          page.mouse.click(box.x + Math.min(CLICK_X_OFFSET, box.width / 2), box.y + box.height / 2))
+        clickCount += 1
+      } catch (error) {
+        if (Date.now() >= deadline) return result('deadline_exceeded', clickCount)
+        lastError = error
+      } finally {
+        if (parent?.dispose) Promise.resolve().then(() => parent.dispose()).catch(() => {})
+      }
+    }
+    if (clickCount > 0) return result('response_parent_clicked', clickCount)
+    if (Date.now() >= deadline) return result('deadline_exceeded')
+
+    // Managed challenges expose the checkbox in a cross-origin iframe rather than
+    // as a top-level response element. Reuse the guarded generic path so we only
+    // click when the challenge target reports a real checkbox.
+    const fallback = await clickTurnstileOnce(page, { deadline })
+    return fallback.clickCount === 0 && lastError && !fallback.error
+      ? { ...fallback, error: lastError.message }
+      : fallback
+  } finally {
+    // Browser teardown remains the final cleanup boundary if CDP stops responding.
+    for (const element of responseElements) {
+      Promise.resolve().then(() => element.dispose?.()).catch(() => {})
     }
   }
-  if (clickCount > 0) return result('response_parent_clicked', clickCount)
-  if (Date.now() >= deadline) return result('deadline_exceeded')
-
-  // Managed challenges expose the checkbox in a cross-origin iframe rather than
-  // as a top-level response element. Reuse the guarded generic path so we only
-  // click when the challenge target reports a real checkbox.
-  const fallback = await clickTurnstileOnce(page, { deadline })
-  return fallback.clickCount === 0 && lastError && !fallback.error
-    ? { ...fallback, error: lastError.message }
-    : fallback
 }
 
 module.exports = {

@@ -126,12 +126,17 @@ async function cloudflare(data, page) {
   let navigationPending = true
   let navigationError
   const interaction = { clickCount: 0, lastState: null, lastError: null }
+  const timeline = []
 
   function publishProgress() {
     data.onProgress?.({ ...progress, interaction: { ...interaction } })
   }
 
   function waiting(phase, reason, extra = {}) {
+    if (progress?.phase !== phase || progress?.reason !== reason) {
+      if (timeline.length === 64) timeline.shift()
+      timeline.push({ elapsedMs: Date.now() - startedAt, phase, reason })
+    }
     progress = { phase, reason, ...extra }
     publishProgress()
     return null
@@ -142,8 +147,8 @@ async function cloudflare(data, page) {
       return await runUntil(deadline, phase, () => readPageState(page, origin))
     } catch (error) {
       if (error.code === 504) throw error
-      // 导航切换会销毁执行上下文，下一轮重新核对文档。
-      return null
+      if (/Execution context was destroyed|Cannot find context with specified id/.test(error.message || '')) return null
+      throw error
     }
   }
 
@@ -215,6 +220,7 @@ async function cloudflare(data, page) {
       navigationError = error
     })
     while (Date.now() < deadline) {
+      data.signal?.throwIfAborted()
       if (navigationError) throw navigationError
       const navigation = observer.current()
       const snapshot = await captureClearance()
@@ -270,6 +276,7 @@ async function cloudflare(data, page) {
     throw error
   } finally {
     observer.close()
+    data.logger?.debug?.('event=iuam_timeline', { request_id: data.requestId, timeline })
   }
 }
 

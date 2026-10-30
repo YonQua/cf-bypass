@@ -100,7 +100,7 @@ async function installSyntheticTurnstilePage(page, { domain, htmlContent, logger
 }
 
 async function turnstile(
-  { domain, proxy, siteKey, timeoutMs, requestDeadline, defaultTimeoutMs, logger, requestId, debugArtifacts },
+  { domain, proxy, siteKey, timeoutMs, requestDeadline, defaultTimeoutMs, logger, requestId, debugArtifacts, signal },
   page
 ) {
   if (!domain) throw createError('Missing domain parameter', 400)
@@ -131,6 +131,7 @@ async function turnstile(
 
     phase = 'turnstile_wait_token'
     const solveResult = await waitForTurnstile(page, {
+      signal,
       deadline: solveDeadline,
       diagnostics,
       readValue: () => readTurnstileToken(page),
@@ -147,6 +148,7 @@ async function turnstile(
       _meta: { interaction: solveResult.interaction },
     }
   } catch (error) {
+    if (signal?.aborted) throw signal.reason
     // Leave time for the caller to receive diagnostics before its request timer closes the browser.
     const detail = await diagnostics.captureFailure({
       timeoutMs: timeout,
